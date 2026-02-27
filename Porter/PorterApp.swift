@@ -6,9 +6,22 @@ import SwiftUI
 
 @main
 struct PorterApp: App {
+    @ObservedObject private var store = PortStore.shared
+
     var body: some Scene {
-        MenuBarExtra("Porter", systemImage: "network") {
+        MenuBarExtra {
             PortListView()
+        } label: {
+            HStack(spacing: 3) {
+                Text("\(store.entries.count)")
+                    .monospacedDigit()
+                Image(systemName: store.entries.isEmpty
+                      ? "square.fill"
+                      : "circle.fill")
+                    .font(.system(size: 7))
+                    .foregroundStyle(store.entries.isEmpty ? .gray : .green)
+            }
+            .onAppear { store.ensurePolling() }
         }
         .menuBarExtraStyle(.window)
     }
@@ -63,14 +76,14 @@ final class PortStore: ObservableObject {
 
     // MARK: - Actions
 
-    func stop(pid: Int32) {
+    func killProcess(pid: Int32) {
         kill(pid, SIGTERM)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.refresh()
         }
     }
 
-    func stopAll() {
+    func killAll() {
         for entry in entries { kill(entry.pid, SIGTERM) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.refresh()
@@ -244,23 +257,35 @@ struct PortListView: View {
                     PortRow(entry: entry, store: store)
                 }
             }
-
-            Divider()
-            footer
         }
         .frame(width: 300)
         .onAppear { store.ensurePolling() }
     }
 
     private var header: some View {
-        HStack {
+        HStack(spacing: 10) {
             Text("Porter").font(.headline)
             Spacer()
+
+            if store.entries.count > 1 {
+                Button("Kill All") { store.killAll() }
+                    .font(.caption)
+                    .controlSize(.small)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.red.opacity(0.8))
+            }
+
             Button(action: store.refresh) {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.borderless)
             .help("Refresh")
+
+            Button("Quit") { NSApplication.shared.terminate(nil) }
+                .font(.caption)
+                .controlSize(.small)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -281,33 +306,6 @@ struct PortListView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
     }
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            Text(store.entries.isEmpty
-                 ? "Watching for servers…"
-                 : "\(store.entries.count) project\(store.entries.count == 1 ? "" : "s") running")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            if store.entries.count > 1 {
-                Button("Stop All") { store.stopAll() }
-                    .font(.caption)
-                    .controlSize(.small)
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.red.opacity(0.8))
-            }
-
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .font(.caption)
-                .controlSize(.small)
-                .buttonStyle(.borderless)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
 }
 
 struct PortRow: View {
@@ -315,55 +313,55 @@ struct PortRow: View {
     let store: PortStore
 
     var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(.green)
-                .frame(width: 8, height: 8)
-                .padding(.top, 1)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(entry.projectName)
+                    .font(.system(.body, weight: .medium))
+                    .lineLimit(1)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(entry.projectName)
-                        .font(.system(.body, weight: .medium))
-                        .lineLimit(1)
+                Spacer()
 
-                    Spacer()
-
-                    if let start = entry.startTime {
-                        Text(formatUptime(from: start))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
+                if let start = entry.startTime {
+                    Text(formatUptime(from: start))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
+            }
 
-                HStack(spacing: 4) {
+            HStack(spacing: 0) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+
                     if !entry.branch.isEmpty {
-                        Label(entry.branch, systemImage: "arrow.triangle.branch")
-                            .lineLimit(1)
-                    }
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.triangle.branch")
+                            Text(entry.branch)
+                                .lineLimit(1)
+                        }
 
-                    Text("·")
+                        Text("·")
+                    }
 
                     Text("localhost:\(entry.id)")
                         .fontDesign(.monospaced)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            }
 
-            HStack(spacing: 4) {
-                Button { NSWorkspace.shared.open(entry.url) } label: {
-                    Text("Open")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                Spacer()
 
-                Button { store.stop(pid: entry.pid) } label: {
-                    Image(systemName: "stop.circle")
+                HStack(spacing: 4) {
+                    Button("Open") { NSWorkspace.shared.open(entry.url) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                    Button("Kill") { store.killProcess(pid: entry.pid) }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderless)
-                .help("Stop server")
             }
         }
         .padding(.horizontal, 16)
@@ -373,7 +371,7 @@ struct PortRow: View {
             Button("Copy URL") { PortStore.copyURL(entry.url) }
             Button("Open in Browser") { NSWorkspace.shared.open(entry.url) }
             Divider()
-            Button("Stop Server", role: .destructive) { store.stop(pid: entry.pid) }
+            Button("Kill Server", role: .destructive) { store.killProcess(pid: entry.pid) }
         }
     }
 }
