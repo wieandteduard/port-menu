@@ -2,18 +2,6 @@ import SwiftUI
 import Network
 
 // ──────────────────────────────────────────────
-// Config – add/remove ports here
-// ──────────────────────────────────────────────
-
-let portMap: [(port: UInt16, name: String)] = [
-    (3000,  "Next.js"),
-    (5173,  "Vite"),
-    (8080,  "Node API"),
-    (9229,  "Node Debug"),
-    (19000, "Expo"),
-]
-
-// ──────────────────────────────────────────────
 // App entry point
 // ──────────────────────────────────────────────
 
@@ -31,90 +19,145 @@ struct PorterApp: App {
 // Model
 // ──────────────────────────────────────────────
 
-struct PortEntry: Identifiable {
+struct ActivePort: Identifiable, Equatable {
     let id: UInt16
-    let name: String
-    var isUp = false
+    let pid: Int32
+    let command: String
+    let projectName: String
+    let projectPath: String
 
     var label: String { "localhost:\(id)" }
     var url: URL { URL(string: "http://localhost:\(id)")! }
 }
 
 // ──────────────────────────────────────────────
-// ViewModel – polling + lightweight TCP probe
+// ViewModel – singleton, polls via lsof
 // ──────────────────────────────────────────────
 
 final class PortStore: ObservableObject {
-    @Published var entries: [PortEntry]
-    @Published var showDown = true
+    static let shared = PortStore()
+
+    @Published var entries: [ActivePort] = []
 
     private var timer: Timer?
-    private static let queue = DispatchQueue(label: "porter.probe", attributes: .concurrent)
 
-    init() {
-        entries = portMap.map { PortEntry(id: $0.port, name: $0.name) }
-    }
+    private init() {}
 
-    func startPolling() {
+    func ensurePolling() {
+        guard timer == nil else { return }
         refresh()
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.refresh()
         }
     }
 
-    func stopPolling() {
-        timer?.invalidate()
-        timer = nil
-    }
-
     func refresh() {
-        for i in entries.indices {
-            let port = entries[i].id
-            Self.probe(port: port) { [weak self] up in
-                DispatchQueue.main.async {
-                    guard let self, i < self.entries.count else { return }
-                    self.entries[i].isUp = up
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ports = Self.discoverPorts()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.entries != ports {
+                    self.entries = ports
                 }
             }
         }
     }
 
-    /// Pure TCP connect to loopback with 200ms timeout. No HTTP, no shell.
-    private static func probe(port: UInt16, completion: @escaping (Bool) -> Void) {
-        let conn = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!, using: .tcp)
-        var done = false
-        let lock = NSLock()
+    // MARK: - Port discovery via lsof
 
-        func finish(_ value: Bool) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !done else { return }
-            done = true
-            completion(value)
+    private static func discoverPorts() -> [ActivePort] {
+        guard let output = shell("/usr/sbin/lsof -iTCP -sTCP:LISTEN -n -P 2>/dev/null") else { return [] }
+
+        var seen = Set<UInt16>()
+        var portInfos: [(port: UInt16, pid: Int32, command: String)] = []
+
+        for line in output.split(separator: "\n").dropFirst() {
+            let cols = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard cols.count >= 10 else { continue }
+            guard let pid = Int32(cols[1]) else { continue }
+
+            let lastCol = String(cols[cols.count - 1])
+            guard lastCol == "(LISTEN)" else { continue }
+            let namePart = String(cols[cols.count - 2])
+            guard let colonIdx = namePart.lastIndex(of: ":"),
+                  let port = UInt16(namePart[namePart.index(after: colonIdx)...]) else { continue }
+
+            guard port >= 1024 else { continue }
+            guard seen.insert(port).inserted else { continue }
+
+            portInfos.append((port, pid, String(cols[0])))
         }
 
-        conn.stateUpdateHandler = { (state: NWConnection.State) in
-            switch state {
-            case .ready:
-                finish(true)
-                conn.cancel()
-            case .failed:
-                finish(false)
-                conn.cancel()
-            case .cancelled:
-                finish(false)
-            default:
-                break
+        let cwds = resolveCWDs(pids: Set(portInfos.map(\.pid)))
+
+        return portInfos
+            .sorted { $0.port < $1.port }
+            .compactMap { info -> ActivePort? in
+                guard let cwd = cwds[info.pid],
+                      let gitRoot = findGitRoot(from: cwd) else { return nil }
+                return ActivePort(
+                    id: info.port,
+                    pid: info.pid,
+                    command: info.command,
+                    projectName: gitRoot.lastPathComponent,
+                    projectPath: cwd
+                )
+            }
+    }
+
+    // MARK: - CWD + project name resolution
+
+    private static func resolveCWDs(pids: Set<Int32>) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let pidList = pids.map(String.init).joined(separator: ",")
+        guard let output = shell("/usr/sbin/lsof -a -p \(pidList) -d cwd -Fn 2>/dev/null") else { return [:] }
+
+        var result = [Int32: String]()
+        var currentPID: Int32?
+
+        for line in output.split(separator: "\n") {
+            if line.hasPrefix("p"), let pid = Int32(line.dropFirst()) {
+                currentPID = pid
+            } else if line.hasPrefix("n/"), let pid = currentPID {
+                result[pid] = String(line.dropFirst())
             }
         }
+        return result
+    }
 
-        conn.start(queue: queue)
-
-        queue.asyncAfter(deadline: .now() + .milliseconds(200)) {
-            finish(false)
-            conn.cancel()
+    private static func findGitRoot(from path: String) -> URL? {
+        var current = URL(fileURLWithPath: path)
+        let fm = FileManager.default
+        while current.path != "/" {
+            if fm.fileExists(atPath: current.appendingPathComponent(".git").path) {
+                return current
+            }
+            current = current.deletingLastPathComponent()
         }
+        return nil
+    }
+
+    // MARK: - Shell helper (deadlock-safe)
+
+    private static func shell(_ command: String) -> String? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do { try process.run() } catch { return nil }
+
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+            if process.isRunning { process.terminate() }
+        }
+
+        // Read BEFORE waitUntilExit — prevents pipe-buffer deadlock
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+
+        return String(data: data, encoding: .utf8)
     }
 }
 
@@ -123,24 +166,17 @@ final class PortStore: ObservableObject {
 // ──────────────────────────────────────────────
 
 struct PortListView: View {
-    @StateObject private var store = PortStore()
-
-    private var visible: [PortEntry] {
-        store.showDown ? store.entries : store.entries.filter(\.isUp)
-    }
+    @ObservedObject private var store = PortStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
 
-            if visible.isEmpty {
-                Text("No ports to show")
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 20)
+            if store.entries.isEmpty {
+                emptyState
             } else {
-                ForEach(visible) { entry in
+                ForEach(store.entries) { entry in
                     PortRow(entry: entry)
                 }
             }
@@ -148,9 +184,8 @@ struct PortListView: View {
             Divider()
             footer
         }
-        .frame(width: 300)
-        .onAppear { store.startPolling() }
-        .onDisappear { store.stopPolling() }
+        .frame(width: 320)
+        .onAppear { store.ensurePolling() }
     }
 
     private var header: some View {
@@ -167,11 +202,24 @@ struct PortListView: View {
         .padding(.vertical, 10)
     }
 
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Image(systemName: "network.slash")
+                .font(.title2)
+                .foregroundStyle(.tertiary)
+            Text("No active ports")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+    }
+
     private var footer: some View {
         HStack {
-            Toggle("Show inactive", isOn: $store.showDown)
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
+            Text("\(store.entries.count) active")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Spacer()
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .controlSize(.small)
@@ -183,41 +231,39 @@ struct PortListView: View {
 }
 
 struct PortRow: View {
-    let entry: PortEntry
+    let entry: ActivePort
 
     var body: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(entry.isUp ? Color.green : Color.red.opacity(0.5))
+                .fill(Color.green)
                 .frame(width: 8, height: 8)
 
-            Text(entry.label)
-                .font(.system(.body, design: .monospaced))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.projectName)
+                    .font(.system(.body, weight: .medium))
+
+                HStack(spacing: 4) {
+                    Text(":\(entry.id)")
+                        .font(.system(.caption, design: .monospaced))
+                    Text("·")
+                    Text(entry.command)
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
+            }
 
             Spacer()
 
-            Text(entry.name)
-                .foregroundStyle(.secondary)
-                .font(.callout)
-
-            Text(entry.isUp ? "up" : "down")
-                .font(.caption2.weight(.medium))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(entry.isUp ? Color.green.opacity(0.15) : Color.red.opacity(0.1))
-                .foregroundStyle(entry.isUp ? .green : .red)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-
-            if entry.isUp {
-                Button { NSWorkspace.shared.open(entry.url) } label: {
-                    Image(systemName: "arrow.up.right.square")
-                }
-                .buttonStyle(.borderless)
-                .help("Open in browser")
+            Button { NSWorkspace.shared.open(entry.url) } label: {
+                Image(systemName: "arrow.up.right.square")
             }
+            .buttonStyle(.borderless)
+            .help("Open in browser")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
+        .help(entry.projectPath)
     }
 }
