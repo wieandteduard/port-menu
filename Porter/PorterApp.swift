@@ -686,9 +686,24 @@ struct RowButtonStyle: ButtonStyle {
 
 private func moveToApplicationsIfNeeded() {
     let bundlePath = Bundle.main.bundlePath
-    guard !bundlePath.hasPrefix("/Applications/"),
-          !bundlePath.contains("DerivedData"),
-          !bundlePath.hasPrefix("/tmp/") else { return }
+
+    // Resolve App Translocation: macOS runs apps opened directly from Downloads
+    // under a read-only temp path. Find the real file in common locations.
+    var sourcePath = bundlePath
+    if bundlePath.contains("AppTranslocation") {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        let appName = URL(fileURLWithPath: bundlePath).lastPathComponent
+        let candidates = ["\(home)/Downloads/\(appName)", "\(home)/Desktop/\(appName)"]
+        if let real = candidates.first(where: { fm.fileExists(atPath: $0) }) {
+            sourcePath = real
+        }
+    }
+
+    guard !sourcePath.hasPrefix("/Applications/"),
+          !sourcePath.contains("DerivedData"),
+          !sourcePath.hasPrefix("/tmp/"),
+          !sourcePath.contains("AppTranslocation") else { return }
 
     let destination = "/Applications/Port Menu.app"
 
@@ -705,14 +720,14 @@ private func moveToApplicationsIfNeeded() {
         if FileManager.default.fileExists(atPath: destination) {
             try FileManager.default.removeItem(atPath: destination)
         }
-        try FileManager.default.moveItem(atPath: bundlePath, toPath: destination)
+        try FileManager.default.moveItem(atPath: sourcePath, toPath: destination)
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         task.arguments = [destination]
         try task.run()
         NSApp.terminate(nil)
     } catch {
-        // If move fails (e.g. permissions), just continue running from current location
+        // If move fails, continue running from current location
     }
 }
 
