@@ -1,0 +1,8 @@
+build/
+*.profraw
+*.xcarchive
+DerivedData/
+.DS_Store
+xcuserdata/
+*.moved-aside
+*.orig
