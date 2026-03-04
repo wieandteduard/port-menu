@@ -38,22 +38,23 @@ struct PorterApp: App {
 struct OnboardingView: View {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @State private var contentReady = false
+    @State private var sequenceStarted = false
     @State private var portVisible: [Bool] = Array(repeating: false, count: 8)
     @State private var portsGone = false
     @State private var titleVisible = false
     @State private var subtitleVisible = false
     @State private var buttonsVisible = false
 
-    // Positions scaled to 320×270
+    // Positions scaled to 340×270
     private let ports: [(label: String, x: CGFloat, y: CGFloat)] = [
-        ("localhost:3000",  50,  44),
-        ("localhost:5173", 250,  31),
-        ("localhost:8080",  33, 135),
-        ("localhost:4000", 242, 131),
-        ("localhost:3001", 132,  78),
-        ("localhost:9000",  67, 222),
-        ("localhost:8000", 245, 211),
-        ("localhost:5000", 153, 182),
+        ("localhost:3000",  53,  44),
+        ("localhost:5173", 266,  31),
+        ("localhost:8080",  35, 135),
+        ("localhost:4000", 257, 131),
+        ("localhost:3001", 140,  78),
+        ("localhost:9000",  71, 222),
+        ("localhost:8000", 260, 211),
+        ("localhost:5000", 163, 182),
     ]
 
     private let revealDelays: [Double] = [0.05, 0.25, 0.42, 0.56, 0.67, 0.75, 0.81, 0.86]
@@ -112,14 +113,19 @@ struct OnboardingView: View {
                 .modifier(RevealModifier(visible: buttonsVisible))
             }
         }
-        .frame(width: 320, height: 270)
+        .frame(width: 340, height: 270)
         .clipped()
         .opacity(contentReady ? 1 : 0)
         .onAppear {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
                 contentReady = true
+                guard !sequenceStarted else { return }
+                sequenceStarted = true
                 runSequence()
             }
+        }
+        .onDisappear {
+            contentReady = false
         }
     }
 
@@ -272,7 +278,12 @@ final class PortStore: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let ports = Self.discoverPorts()
             DispatchQueue.main.async {
-                self?.entries = ports
+                guard let self else { return }
+                let currentIDs = self.entries.map(\.id)
+                let newIDs = ports.map(\.id)
+                if currentIDs != newIDs {
+                    self.entries = ports
+                }
             }
         }
     }
@@ -374,21 +385,24 @@ final class PortStore: ObservableObject {
         return result
     }
 
+    private static let startTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        return f
+    }()
+
     private static func resolveStartTimes(pids: Set<Int32>) -> [Int32: Date] {
         guard !pids.isEmpty else { return [:] }
         let pidList = pids.map(String.init).joined(separator: ",")
-        guard let output = shell("/bin/ps -p \(pidList) -o pid=,lstart= 2>/dev/null") else { return [:] }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "EEE MMM d HH:mm:ss yyyy"
+        guard let output = shell("LC_ALL=C /bin/ps -p \(pidList) -o pid=,lstart= 2>/dev/null") else { return [:] }
 
         var result = [Int32: Date]()
         for line in output.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
             let normalized = parts[1].split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
-            if let date = formatter.date(from: normalized) {
+            if let date = startTimeFormatter.date(from: normalized) {
                 result[pid] = date
             }
         }
