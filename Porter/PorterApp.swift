@@ -8,6 +8,10 @@ import SwiftUI
 struct PorterApp: App {
     @ObservedObject private var store = PortStore.shared
 
+    init() {
+        moveToApplicationsIfNeeded()
+    }
+
     var body: some Scene {
         MenuBarExtra {
             PortListView()
@@ -646,6 +650,38 @@ struct HoverButton: View {
 }
 
 // MARK: - Helpers
+
+private func moveToApplicationsIfNeeded() {
+    let bundlePath = Bundle.main.bundlePath
+    guard !bundlePath.hasPrefix("/Applications/"),
+          !bundlePath.contains("DerivedData"),
+          !bundlePath.hasPrefix("/tmp/") else { return }
+
+    let destination = "/Applications/Porter.app"
+
+    let alert = NSAlert()
+    alert.messageText = "Move to Applications Folder?"
+    alert.informativeText = "Port Menu works best when run from the Applications folder."
+    alert.addButton(withTitle: "Move to Applications")
+    alert.addButton(withTitle: "Don't Move")
+    alert.alertStyle = .informational
+
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+    do {
+        if FileManager.default.fileExists(atPath: destination) {
+            try FileManager.default.removeItem(atPath: destination)
+        }
+        try FileManager.default.moveItem(atPath: bundlePath, toPath: destination)
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = [destination]
+        try task.run()
+        NSApp.terminate(nil)
+    } catch {
+        // If move fails (e.g. permissions), just continue running from current location
+    }
+}
 
 private func formatUptime(from start: Date) -> String {
     let s = Int(Date().timeIntervalSince(start))
