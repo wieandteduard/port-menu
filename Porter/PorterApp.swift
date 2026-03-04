@@ -39,7 +39,7 @@ struct PorterApp: App {
 // Onboarding
 // ──────────────────────────────────────────────
 
-final class OnboardingWindowController: NSObject {
+final class OnboardingWindowController: NSObject, NSWindowDelegate {
     static let shared = OnboardingWindowController()
     private var window: NSWindow?
 
@@ -57,6 +57,7 @@ final class OnboardingWindowController: NSObject {
         window.contentView = NSHostingView(rootView: OnboardingView())
         window.center()
         window.level = .floating
+        window.delegate = self
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -64,7 +65,13 @@ final class OnboardingWindowController: NSObject {
     }
 
     func close() {
+        window?.delegate = nil
         window?.orderOut(nil)
+        window = nil
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func windowWillClose(_ notification: Notification) {
         window = nil
         NSApp.setActivationPolicy(.accessory)
     }
@@ -191,6 +198,10 @@ struct ScrambleText: View {
         Text(displayed.isEmpty ? target : displayed)
             .onChange(of: trigger) { active in
                 if active { startScramble() }
+            }
+            .onDisappear {
+                scrambleTimer?.invalidate()
+                scrambleTimer = nil
             }
     }
 
