@@ -8,14 +8,6 @@ import SwiftUI
 struct PorterApp: App {
     @ObservedObject private var store = PortStore.shared
 
-    init() {
-        if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                OnboardingWindowController.shared.show()
-            }
-        }
-    }
-
     var body: some Scene {
         MenuBarExtra {
             PortListView()
@@ -39,63 +31,26 @@ struct PorterApp: App {
 // Onboarding
 // ──────────────────────────────────────────────
 
-final class OnboardingWindowController: NSObject, NSWindowDelegate {
-    static let shared = OnboardingWindowController()
-    private var window: NSWindow?
-
-    func show() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 320),
-            styleMask: [.titled, .closable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
-        window.backgroundColor = .white
-        window.contentView = NSHostingView(rootView: OnboardingView())
-        window.center()
-        window.level = .floating
-        window.delegate = self
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
-        self.window = window
-    }
-
-    func close() {
-        window?.delegate = nil
-        window?.orderOut(nil)
-        window = nil
-        NSApp.setActivationPolicy(.accessory)
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        window = nil
-        NSApp.setActivationPolicy(.accessory)
-    }
-}
-
 struct OnboardingView: View {
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @State private var portVisible: [Bool] = Array(repeating: false, count: 8)
     @State private var portsGone = false
     @State private var titleVisible = false
     @State private var subtitleVisible = false
     @State private var buttonsVisible = false
 
+    // Positions scaled to 340×280 from original 460×320
     private let ports: [(label: String, x: CGFloat, y: CGFloat)] = [
-        ("localhost:3000",  72,  52),
-        ("localhost:5173", 358,  38),
-        ("localhost:8080",  48, 162),
-        ("localhost:4000", 348, 158),
-        ("localhost:3001", 190,  94),
-        ("localhost:9000",  96, 268),
-        ("localhost:8000", 352, 256),
-        ("localhost:5000", 220, 220),
+        ("localhost:3000",  53,  46),
+        ("localhost:5173", 265,  33),
+        ("localhost:8080",  35, 142),
+        ("localhost:4000", 257, 138),
+        ("localhost:3001", 140,  82),
+        ("localhost:9000",  71, 235),
+        ("localhost:8000", 260, 224),
+        ("localhost:5000", 163, 193),
     ]
 
-    // Accelerating delays — gaps shrink each step
     private let revealDelays: [Double] = [0.05, 0.25, 0.42, 0.56, 0.67, 0.75, 0.81, 0.86]
 
     var body: some View {
@@ -103,7 +58,7 @@ struct OnboardingView: View {
             // Phase 1: scattered ports
             ForEach(ports.indices, id: \.self) { i in
                 ScrambleText(target: ports[i].label, trigger: portVisible[i])
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .font(.system(size: 10, weight: .regular, design: .monospaced))
                     .foregroundStyle(Color.primary.opacity(portsGone ? 0 : 0.22))
                     .blur(radius: portVisible[i] ? (portsGone ? 6 : 0) : 4)
                     .scaleEffect(portVisible[i] ? (portsGone ? 0.94 : 1) : 0.88)
@@ -117,27 +72,26 @@ struct OnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 0) {
                     Text("localhost,\norganized.")
-                        .font(.system(size: 40, weight: .semibold))
+                        .font(.system(size: 32, weight: .semibold))
                         .tracking(-0.5)
                         .lineSpacing(2)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 14)
                         .modifier(RevealModifier(visible: titleVisible))
 
                     Text("A menu bar app that tracks your\ndev servers across projects.")
-                        .font(.system(size: 16, weight: .regular))
+                        .font(.system(size: 13, weight: .regular))
                         .foregroundStyle(.secondary)
-                        .lineSpacing(4)
+                        .lineSpacing(3)
                         .modifier(RevealModifier(visible: subtitleVisible))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 48)
+                .padding(.horizontal, 32)
 
                 Spacer()
 
                 HStack(spacing: 10) {
                     Button("Get Started") {
-                        UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
-                        OnboardingWindowController.shared.close()
+                        hasCompletedOnboarding = true
                     }
                     .buttonStyle(OnboardingButtonStyle())
 
@@ -148,18 +102,16 @@ struct OnboardingView: View {
                     }
                     .buttonStyle(OnboardingSecondaryButtonStyle())
                 }
-                .padding(.horizontal, 48)
-                .padding(.bottom, 40)
+                .padding(.horizontal, 32)
+                .padding(.bottom, 28)
                 .modifier(RevealModifier(visible: buttonsVisible))
             }
         }
-        .frame(width: 460, height: 320)
-        .background(Color.white)
+        .frame(width: 340, height: 280)
         .onAppear { runSequence() }
     }
 
     private func runSequence() {
-        // Phase 1: reveal ports one by one, accelerating
         for i in ports.indices {
             DispatchQueue.main.asyncAfter(deadline: .now() + revealDelays[i]) {
                 withAnimation(.easeOut(duration: 0.16)) {
@@ -167,13 +119,11 @@ struct OnboardingView: View {
                 }
             }
         }
-        // Fade all ports out simultaneously — give scramble time to settle
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) {
             withAnimation(.easeInOut(duration: 0.35)) {
                 portsGone = true
             }
         }
-        // Phase 2: main content reveals
         withAnimation(.spring(response: 0.7, dampingFraction: 0.85).delay(1.95)) {
             titleVisible = true
         }
@@ -485,8 +435,22 @@ final class PortStore: ObservableObject {
 
 struct PortListView: View {
     @ObservedObject private var store = PortStore.shared
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
 
     var body: some View {
+        Group {
+            if hasCompletedOnboarding {
+                mainContent
+            } else {
+                OnboardingView()
+            }
+        }
+        .frame(width: 340)
+        .animation(.easeInOut(duration: 0.25), value: hasCompletedOnboarding)
+        .onAppear { store.ensurePolling() }
+    }
+
+    private var mainContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
@@ -500,8 +464,6 @@ struct PortListView: View {
                 .padding(.bottom, 6)
             }
         }
-        .frame(width: 340)
-        .onAppear { store.ensurePolling() }
     }
 
     private var header: some View {
