@@ -10,15 +10,6 @@ struct PorterApp: App {
 
     init() {
         moveToApplicationsIfNeeded()
-        // Auto-open the popup on first launch so onboarding is immediately visible
-        if !UserDefaults.standard.bool(forKey: "hasCompletedOnboarding") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                if let items = NSStatusBar.system.value(forKey: "statusItems") as? [NSStatusItem],
-                   let button = items.first?.button {
-                    button.performClick(nil)
-                }
-            }
-        }
     }
 
     var body: some Scene {
