@@ -331,7 +331,7 @@ final class PortStore: ObservableObject {
             guard let colonIdx = namePart.lastIndex(of: ":"),
                   let port = UInt16(namePart[namePart.index(after: colonIdx)...]) else { continue }
 
-            guard port >= 1024 else { continue }
+            guard port >= 1024, port < 49152 else { continue }
             guard seen.insert(port).inserted else { continue }
 
             portInfos.append((port, pid))
