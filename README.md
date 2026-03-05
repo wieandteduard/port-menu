@@ -21,7 +21,7 @@ Port Menu sits in your menu bar and automatically detects local development serv
 
 **[Download for macOS →](https://portmenu.dev)**
 
-Requires macOS 13 (Ventura) or later.
+Requires macOS 14 (Sonoma) or later.
 
 1. Download and unzip
 2. Open `Port Menu.app` — it will offer to move itself to your Applications folder
