@@ -75,7 +75,7 @@ func moveToApplicationsIfNeeded() {
             try? fileManager.removeItem(at: backupURL)
         }
 
-        relaunchInstalledApp(at: destinationURL)
+        relaunchInstalledApp(from: sourceURL, to: destinationURL)
     } catch {
         Log.lifecycle.error("Failed to move app to Applications: \(error.localizedDescription)")
         showApplicationsInstallError(error)
@@ -83,13 +83,15 @@ func moveToApplicationsIfNeeded() {
 }
 
 @MainActor
-private func relaunchInstalledApp(at appURL: URL) {
+private func relaunchInstalledApp(from sourceURL: URL, to appURL: URL) {
     do {
+        let escapedAppPath = appURL.path().replacingOccurrences(of: "'", with: "'\\''")
+        let escapedSourcePath = sourceURL.path().replacingOccurrences(of: "'", with: "'\\''")
         let process = Process()
         process.executableURL = URL(filePath: "/bin/sh")
         process.arguments = [
             "-c",
-            "sleep 0.4; open -n '\(appURL.path().replacingOccurrences(of: "'", with: "'\\''"))'"
+            "sleep 0.4; open -n '\(escapedAppPath)' && sleep 1 && rm -rf '\(escapedSourcePath)'"
         ]
         try process.run()
         NSApp.terminate(nil)
