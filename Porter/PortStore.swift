@@ -120,6 +120,21 @@ final class PortStore {
         Log.store.info("Killed PID \(pid) on port \(port)")
     }
 
+    func killAllProcesses() {
+        let currentEntries = entries
+        guard !currentEntries.isEmpty else { return }
+
+        for entry in currentEntries {
+            kill(entry.pid, SIGTERM)
+            recentlyKilled[entry.port] = Date()
+        }
+
+        Log.store.info("Killed \(currentEntries.count) processes")
+        withAnimation(.easeInOut(duration: 0.25)) {
+            entries = []
+        }
+    }
+
     func removeEntry(port: UInt16) {
         withAnimation(.easeInOut(duration: 0.3)) {
             entries.removeAll { $0.port == port }

@@ -398,6 +398,25 @@ struct FallbackFilterTests {
         #expect(store.entries.isEmpty)
     }
 
+    @Test @MainActor func killAllProcessesFiltersRecentlyKilledPorts() async throws {
+        let ports = [
+            ActivePort(port: 3000, pid: 99998, projectName: "web", branch: "", startTime: nil),
+            ActivePort(port: 5173, pid: 99997, projectName: "app", branch: "", startTime: nil)
+        ]
+        let store = PortStore(scanner: FakePortScanner(ports: ports, delay: 0))
+
+        store.refresh()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries.count == 2)
+
+        store.killAllProcesses()
+        #expect(store.entries.isEmpty)
+
+        store.refresh()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries.isEmpty)
+    }
+
     @Test @MainActor func diagnosticsSnapshot() {
         let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
         let snapshot = store.diagnosticsSnapshot

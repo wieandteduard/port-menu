@@ -52,19 +52,113 @@ struct PortHeaderView: View {
             Text("Port Menu").font(.headline)
             Spacer()
 
-            Button("Refresh", systemImage: "arrow.clockwise", action: store.refresh)
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .help("Refresh now")
+            if !store.entries.isEmpty {
+                HeaderControlButton(
+                    tooltip: nil,
+                    destructive: true,
+                    action: store.killAllProcesses
+                ) {
+                    Text("Kill all")
+                }
+            }
 
-            Button("Quit") { NSApplication.shared.terminate(nil) }
-                .font(.caption)
-                .controlSize(.small)
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
+            HeaderControlButton(
+                tooltip: "Quit Port Menu",
+                tooltipAlignment: .bottomTrailing,
+                tooltipOffset: .init(width: -4, height: 28),
+                action: { NSApplication.shared.terminate(nil) }
+            ) {
+                Image(systemName: "power")
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+}
+
+struct HeaderControlButton<Label: View>: View {
+    let tooltip: String?
+    var destructive: Bool = false
+    var tooltipAlignment: Alignment = .bottom
+    var tooltipOffset: CGSize = .init(width: 0, height: 28)
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            label()
+        }
+        .buttonStyle(HeaderButtonStyle(destructive: destructive, isHovered: isHovered))
+        .overlay(alignment: tooltipAlignment) {
+            if isHovered, let tooltip {
+                HeaderTooltip(text: tooltip)
+                    .offset(tooltipOffset)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                    .allowsHitTesting(false)
+            }
+        }
+        .zIndex(isHovered ? 1 : 0)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+    }
+}
+
+struct HeaderButtonStyle: ButtonStyle {
+    var destructive: Bool = false
+    var isHovered: Bool = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.caption)
+            .padding(.horizontal, horizontalPadding)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(backgroundColor(configuration)))
+            .foregroundStyle(foregroundColor)
+            .scaleEffect(configuration.isPressed ? 0.92 : isHovered ? 1.04 : 1)
+            .animation(.spring(response: 0.2, dampingFraction: 0.6), value: configuration.isPressed)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isHovered)
+    }
+
+    private var horizontalPadding: CGFloat { destructive ? 10 : 7 }
+
+    private func backgroundColor(_ c: ButtonStyleConfiguration) -> Color {
+        if destructive {
+            if c.isPressed { return .red.opacity(0.18) }
+            return isHovered ? .red.opacity(0.12) : .clear
+        }
+        if c.isPressed { return .primary.opacity(0.14) }
+        return isHovered ? .primary.opacity(0.08) : .clear
+    }
+
+    private var foregroundColor: Color {
+        if destructive {
+            return isHovered ? .red : .secondary
+        }
+        return .secondary
+    }
+}
+
+struct HeaderTooltip: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption2)
+            .lineLimit(1)
+            .fixedSize()
+            .foregroundStyle(.white.opacity(0.96))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(Color.black.opacity(0.82))
+            )
+            .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
     }
 }
 
