@@ -7,11 +7,15 @@ func moveToApplicationsIfNeeded() {
     let destinationURL = URL(filePath: "/Applications/Port Menu.app")
     let fileManager = FileManager.default
 
-    // If the app is already running from a translocated path but a copy already
-    // exists in /Applications, just relaunch from there silently — no dialog needed.
+    // If running from a translocated path and a copy already exists in /Applications,
+    // just activate/open that copy silently — no dialog, no "new instance" error.
     if bundlePath.contains("AppTranslocation"),
        fileManager.fileExists(atPath: destinationURL.path()) {
-        relaunchInstalledApp(from: URL(filePath: bundlePath), to: destinationURL)
+        NSWorkspace.shared.openApplication(
+            at: destinationURL,
+            configuration: NSWorkspace.OpenConfiguration()
+        ) { _, _ in }
+        NSApp.terminate(nil)
         return
     }
 
