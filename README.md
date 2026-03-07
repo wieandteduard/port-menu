@@ -23,9 +23,10 @@ Port Menu sits in your menu bar and automatically detects local development serv
 
 Requires macOS 14 (Sonoma) or later.
 
-1. Download and unzip
-2. Open `Port Menu.app` — it will offer to move itself to your Applications folder
-3. Click the icon in your menu bar to get started
+1. Download and open the DMG
+2. Drag `Port Menu.app` into `Applications`
+3. Open Port Menu from `Applications`
+4. Click the icon in your menu bar to get started
 
 ## Build from source
 
