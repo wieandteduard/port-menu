@@ -153,6 +153,36 @@ struct ActivePortTests {
         #expect(port.url.absoluteString == "http://localhost:3000")
     }
 
+    @Test func tunnelCommandShellQuotesHostAlias() {
+        let port = ActivePort(
+            port: 3000,
+            pid: nil,
+            projectName: "node",
+            branch: "",
+            startTime: nil,
+            source: .ssh,
+            hostID: "dev'box; touch /tmp/nope",
+            hostDisplayName: "devbox"
+        )
+
+        #expect(port.tunnelCommand == "ssh -N -L 3000:127.0.0.1:3000 -- 'dev'\\''box; touch /tmp/nope'")
+    }
+
+    @Test func tunnelCommandTerminatesOptionsBeforeHostAlias() {
+        let port = ActivePort(
+            port: 8080,
+            pid: nil,
+            projectName: "node",
+            branch: "",
+            startTime: nil,
+            source: .ssh,
+            hostID: "-oProxyCommand=touch /tmp/nope",
+            hostDisplayName: "devbox"
+        )
+
+        #expect(port.tunnelCommand == "ssh -N -L 8080:127.0.0.1:8080 -- '-oProxyCommand=touch /tmp/nope'")
+    }
+
     @Test func compositeIdentity() {
         let a = ActivePort(port: 3000, pid: 100, projectName: "test", branch: "main", startTime: nil)
         let b = ActivePort(port: 3000, pid: 200, projectName: "test", branch: "main", startTime: nil)
@@ -401,11 +431,141 @@ struct DockerDisplayNameTests {
     }
 }
 
+// MARK: - SSH Host Discovery Tests
+
+struct SSHHostDiscoveryTests {
+
+    @Test func parsesConcreteSSHHosts() {
+        let config = """
+        Host *
+          ServerAliveInterval 60
+
+        Host hetzner
+          HostName hetzner.tailnet.example
+          User root
+          Port 2222
+
+        Host dev-* ignored?
+          User deploy
+
+        Host mini workstation
+          HostName %h.local
+        """
+
+        let hosts = SSHHostDiscovery.parseConfig(config)
+
+        #expect(hosts.map(\.alias) == ["hetzner", "mini", "workstation"])
+        #expect(hosts[0].hostName == "hetzner.tailnet.example")
+        #expect(hosts[0].user == "root")
+        #expect(hosts[0].port == 2222)
+        #expect(hosts[1].hostName == "mini.local")
+        #expect(hosts[2].hostName == "workstation.local")
+    }
+
+    @Test func expandsIncludedSSHHostBlocks() {
+        let config = """
+        Include conf.d/dev.conf conf.d/more.conf
+
+        Host local
+          HostName local.example
+        """
+        let included = [
+            "conf.d/dev.conf": """
+            Host devbox
+              HostName devbox.example
+            """,
+            "conf.d/more.conf": """
+            Host staging
+              User deploy
+            """
+        ]
+
+        let hosts = SSHHostDiscovery.parseConfig(config) { included[$0] }
+
+        #expect(hosts.map(\.alias) == ["devbox", "local", "staging"])
+        #expect(hosts[0].hostName == "devbox.example")
+        #expect(hosts[2].user == "deploy")
+    }
+}
+
+// MARK: - SSH Remote Parser Tests
+
+struct SSHRemoteParserTests {
+
+    @Test func parsesRemoteLsofOutput() {
+        let output = """
+        __PORT_MENU_LSOF__
+        COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+        node    12345 root   22u  IPv4 12345      0t0  TCP *:3000 (LISTEN)
+        python  23456 root   23u  IPv4 23456      0t0  TCP 127.0.0.1:8000 (LISTEN)
+        """
+        let host = SSHHost(alias: "devbox", hostName: "devbox.tailnet", user: nil, port: nil)
+
+        let ports = LiveSSHPortScanner.parseRemoteOutput(output, host: host, scannedAt: Date())
+
+        #expect(ports.count == 2)
+        #expect(ports[0].source == .ssh)
+        #expect(ports[0].hostID == "devbox")
+        #expect(ports[0].hostAddress == "devbox.tailnet")
+        #expect(!ports[0].isLoopbackBound)
+        #expect(ports[1].isLoopbackBound)
+    }
+
+    @Test func parsesRemoteSSOutput() {
+        let output = """
+        __PORT_MENU_SS__
+        LISTEN 0 511 0.0.0.0:5173 0.0.0.0:* users:(("node",pid=123,fd=20))
+        LISTEN 0 128 [::1]:8080 [::]:* users:(("python3",pid=456,fd=7))
+        """
+        let host = SSHHost(alias: "box", hostName: nil, user: nil, port: nil)
+
+        let ports = LiveSSHPortScanner.parseRemoteOutput(output, host: host, scannedAt: Date())
+
+        #expect(ports.count == 2)
+        #expect(ports[0].port == 5173)
+        #expect(ports[0].projectName == "node")
+        #expect(ports[0].pid == 123)
+        #expect(!ports[0].isLoopbackBound)
+        #expect(ports[1].port == 8080)
+        #expect(ports[1].projectName == "python3")
+        #expect(ports[1].isLoopbackBound)
+    }
+
+    @Test func treatsEmptyRemoteOutputAsNoPorts() {
+        let host = SSHHost(alias: "quiet", hostName: nil, user: nil, port: nil)
+        let ports = LiveSSHPortScanner.parseRemoteOutput(
+            "__PORT_MENU_EMPTY__\n",
+            host: host,
+            scannedAt: Date()
+        )
+
+        #expect(ports.isEmpty)
+    }
+}
+
+// MARK: - Fake SSH Scanner
+
+struct FakeSSHPortScanner: SSHPortScanning {
+    var scansByHostID: [String: SSHHostScan]
+    var delay: TimeInterval
+
+    init(scans: [SSHHostScan] = [], delay: TimeInterval = 0) {
+        self.scansByHostID = Dictionary(uniqueKeysWithValues: scans.map { ($0.host.id, $0) })
+        self.delay = delay
+    }
+
+    func scan(hosts: [SSHHost]) async -> [SSHHostScan] {
+        try? await Task.sleep(for: .seconds(delay))
+        return hosts.compactMap { scansByHostID[$0.id] }
+    }
+}
+
 // MARK: - PortStore Tests
 
 @Suite(.serialized) struct PortStoreTests {
 
     @Test @MainActor func storeInitializesEmpty() {
+        Self.resetSSHHostStorage()
         let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
         #expect(store.entries.isEmpty)
         #expect(store.lastError == nil)
@@ -413,6 +573,7 @@ struct DockerDisplayNameTests {
     }
 
     @Test @MainActor func refreshPopulatesEntries() async throws {
+        Self.resetSSHHostStorage()
         let ports = [
             ActivePort(port: 3000, pid: 1, projectName: "test", branch: "main", startTime: nil)
         ]
@@ -426,6 +587,7 @@ struct DockerDisplayNameTests {
     }
 
     @Test @MainActor func refreshHandlesFailure() async throws {
+        Self.resetSSHHostStorage()
         let store = PortStore(scanner: FakePortScanner(shouldFail: true))
 
         store.refresh()
@@ -435,6 +597,7 @@ struct DockerDisplayNameTests {
     }
 
     @Test @MainActor func killProcessAddsToRecentlyKilled() async throws {
+        Self.resetSSHHostStorage()
         let ports = [
             ActivePort(port: 3000, pid: 99999, projectName: "test", branch: "", startTime: nil)
         ]
@@ -452,6 +615,7 @@ struct DockerDisplayNameTests {
     }
 
     @Test @MainActor func killAllProcessesFiltersRecentlyKilledPorts() async throws {
+        Self.resetSSHHostStorage()
         let ports = [
             ActivePort(port: 3000, pid: 99998, projectName: "web", branch: "", startTime: nil),
             ActivePort(port: 5173, pid: 99997, projectName: "app", branch: "", startTime: nil)
@@ -470,11 +634,145 @@ struct DockerDisplayNameTests {
         #expect(store.entries.isEmpty)
     }
 
+    @Test @MainActor func killAllProcessesKeepsRemoteEntriesVisible() {
+        Self.resetSSHHostStorage()
+        let remoteHost = SSHHost(alias: "devbox", hostName: nil, user: nil, port: nil)
+        let local = ActivePort(port: 3000, pid: 99998, projectName: "web", branch: "", startTime: nil)
+        let remote = Self.remotePort(port: 8080, host: remoteHost)
+        let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
+        store.entries = [local, remote]
+
+        store.killAllProcesses()
+
+        #expect(store.entries == [remote])
+    }
+
+    @Test @MainActor func enablingSSHHostAppendsRemoteEntriesWithoutDroppingLocalEntries() async throws {
+        Self.resetSSHHostStorage()
+        let host = SSHHost(alias: "devbox", hostName: "devbox.local", user: nil, port: nil)
+        let local = ActivePort(port: 3000, pid: 1, projectName: "web", branch: "", startTime: nil)
+        let remote = Self.remotePort(port: 8080, host: host)
+        let store = PortStore(
+            scanner: FakePortScanner(ports: [local], delay: 0),
+            sshScanner: FakeSSHPortScanner(scans: [Self.scan(host: host, ports: [remote])])
+        )
+        store.sshHosts = [host]
+
+        store.refresh()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries == [local])
+
+        store.setSSHHost(host, enabled: true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(store.entries.contains(local))
+        #expect(store.entries.contains(remote))
+        #expect(store.entries.count == 2)
+    }
+
+    @Test @MainActor func disablingSSHHostRemovesOnlyThatHostsRemoteEntries() async throws {
+        Self.resetSSHHostStorage()
+        let firstHost = SSHHost(alias: "devbox", hostName: nil, user: nil, port: nil)
+        let secondHost = SSHHost(alias: "staging", hostName: nil, user: nil, port: nil)
+        let local = ActivePort(port: 3000, pid: 1, projectName: "web", branch: "", startTime: nil)
+        let firstRemote = Self.remotePort(port: 8080, host: firstHost)
+        let secondRemote = Self.remotePort(port: 9090, host: secondHost)
+        let store = PortStore(
+            scanner: FakePortScanner(ports: [local], delay: 0),
+            sshScanner: FakeSSHPortScanner(scans: [
+                Self.scan(host: firstHost, ports: [firstRemote]),
+                Self.scan(host: secondHost, ports: [secondRemote])
+            ])
+        )
+        store.sshHosts = [firstHost, secondHost]
+
+        store.refresh()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        store.setSSHHost(firstHost, enabled: true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        store.setSSHHost(secondHost, enabled: true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries.count == 3)
+
+        store.setSSHHost(firstHost, enabled: false)
+
+        #expect(!store.entries.contains(firstRemote))
+        #expect(store.entries.contains(local))
+        #expect(store.entries.contains(secondRemote))
+    }
+
+    @Test @MainActor func disablingSSHHostPreventsInflightScanFromReinsertingEntries() async throws {
+        Self.resetSSHHostStorage()
+        let host = SSHHost(alias: "slowbox", hostName: nil, user: nil, port: nil)
+        let remote = Self.remotePort(port: 8080, host: host)
+        let store = PortStore(
+            scanner: FakePortScanner(ports: [], delay: 0),
+            sshScanner: FakeSSHPortScanner(
+                scans: [Self.scan(host: host, ports: [remote])],
+                delay: 0.15
+            )
+        )
+        store.sshHosts = [host]
+
+        store.setSSHHost(host, enabled: true)
+        store.setSSHHost(host, enabled: false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(store.entries.isEmpty)
+    }
+
+    @Test @MainActor func disablingSSHHostDuringFullRefreshDoesNotReinsertEntries() async throws {
+        Self.resetSSHHostStorage()
+        let host = SSHHost(alias: "slowbox", hostName: nil, user: nil, port: nil)
+        let remote = Self.remotePort(port: 8080, host: host)
+        let store = PortStore(
+            scanner: FakePortScanner(ports: [], delay: 0),
+            sshScanner: FakeSSHPortScanner(
+                scans: [Self.scan(host: host, ports: [remote])],
+                delay: 0.15
+            )
+        )
+        store.sshHosts = [host]
+        store.setSSHHost(host, enabled: true)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries == [remote])
+
+        store.refresh()
+        store.setSSHHost(host, enabled: false)
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(store.entries.isEmpty)
+    }
+
     @Test @MainActor func diagnosticsSnapshot() {
+        Self.resetSSHHostStorage()
         let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
         let snapshot = store.diagnosticsSnapshot
         #expect(snapshot.contains("Port Menu Diagnostics"))
         #expect(snapshot.contains("Ports found: 0"))
+    }
+
+    private static func resetSSHHostStorage() {
+        UserDefaults.standard.removeObject(forKey: "enabledSSHHosts")
+    }
+
+    private static func remotePort(port: UInt16, host: SSHHost) -> ActivePort {
+        ActivePort(
+            port: port,
+            pid: 123,
+            projectName: "remote",
+            branch: "",
+            startTime: nil,
+            source: .ssh,
+            hostID: host.id,
+            hostDisplayName: host.alias,
+            hostAddress: host.addressForURL,
+            scannedAt: Date()
+        )
+    }
+
+    private static func scan(host: SSHHost, ports: [ActivePort]) -> SSHHostScan {
+        SSHHostScan(host: host, ports: ports, errorDescription: nil, scannedAt: Date())
     }
 }
 
