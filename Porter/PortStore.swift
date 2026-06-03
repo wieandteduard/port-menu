@@ -9,12 +9,16 @@ final class PortStore {
     static let shared = PortStore()
 
     var entries: [ActivePort] = []
+    var sshHosts: [SSHHost] = []
+    var sshHostErrors: [String: String] = [:]
     var lastError: ScanError?
     var isScanning: Bool = false
     var lastDiagnostics: ScanDiagnostics?
 
     @ObservationIgnored
     @AppStorage("refreshInterval") private var storedInterval: Double = RefreshInterval.defaultInterval.rawValue
+    @ObservationIgnored
+    @AppStorage("enabledSSHHosts") private var enabledSSHHostsStorage: String = ""
 
     var refreshInterval: RefreshInterval {
         get { RefreshInterval(rawValue: storedInterval) ?? .defaultInterval }
@@ -26,16 +30,94 @@ final class PortStore {
     }
 
     @ObservationIgnored private let scanner: PortScanning
+    @ObservationIgnored private let sshScanner: SSHPortScanning
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var recentlyKilled: [UInt16: Date] = [:]
+    @ObservationIgnored private var remoteEntriesByHost: [String: [ActivePort]] = [:]
+    @ObservationIgnored private var lastRemoteScanAt: [String: Date] = [:]
     @ObservationIgnored private var sleepObserver: Any?
     @ObservationIgnored private var wakeObserver: Any?
 
-    init(scanner: PortScanning = LivePortScanner()) {
+    private static let remoteRefreshInterval: TimeInterval = 60
+
+    init(
+        scanner: PortScanning = LivePortScanner(),
+        sshScanner: SSHPortScanning = LiveSSHPortScanner()
+    ) {
         self.scanner = scanner
+        self.sshScanner = sshScanner
+        self.sshHosts = SSHHostDiscovery.discoverHosts()
         setupLifecycleObservers()
         Log.lifecycle.info("PortStore initialized")
+    }
+
+    var enabledSSHHostIDs: Set<String> {
+        Set(enabledSSHHostsStorage
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init))
+    }
+
+    var enabledSSHHosts: [SSHHost] {
+        let enabled = enabledSSHHostIDs
+        return sshHosts.filter { enabled.contains($0.id) }
+    }
+
+    var hasRemoteDiscovery: Bool {
+        !sshHosts.isEmpty
+    }
+
+    func isSSHHostEnabled(_ host: SSHHost) -> Bool {
+        enabledSSHHostIDs.contains(host.id)
+    }
+
+    func setSSHHost(_ host: SSHHost, enabled: Bool) {
+        var enabledIDs = enabledSSHHostIDs
+        if enabled {
+            enabledIDs.insert(host.id)
+            lastRemoteScanAt[host.id] = nil
+        } else {
+            enabledIDs.remove(host.id)
+            remoteEntriesByHost[host.id] = nil
+            sshHostErrors[host.id] = nil
+            lastRemoteScanAt[host.id] = nil
+        }
+        enabledSSHHostsStorage = enabledIDs.sorted().joined(separator: "\n")
+        if !enabled {
+            removeEntries(forHost: host.id)
+        }
+        if enabled {
+            refreshSSHHost(host.id)
+        }
+    }
+
+    func reloadSSHHosts() {
+        sshHosts = SSHHostDiscovery.discoverHosts()
+        let knownIDs = Set(sshHosts.map(\.id))
+        let pruned = enabledSSHHostIDs.intersection(knownIDs)
+        enabledSSHHostsStorage = pruned.sorted().joined(separator: "\n")
+        remoteEntriesByHost = remoteEntriesByHost.filter { knownIDs.contains($0.key) }
+        sshHostErrors = sshHostErrors.filter { knownIDs.contains($0.key) }
+        lastRemoteScanAt = lastRemoteScanAt.filter { knownIDs.contains($0.key) }
+        refresh()
+    }
+
+    func refreshSSHHost(_ hostID: String) {
+        guard let host = sshHosts.first(where: { $0.id == hostID }),
+              enabledSSHHostIDs.contains(hostID) else { return }
+
+        Task { [sshScanner] in
+            isScanning = true
+            defer { isScanning = false }
+
+            let scans = await sshScanner.scan(hosts: [host])
+            guard !Task.isCancelled else { return }
+            guard enabledSSHHostIDs.contains(hostID) else { return }
+
+            applyRemoteScans(scans, enabledHosts: enabledSSHHosts)
+            let localEntries = entries.filter(\.isLocal)
+            applyUpdate(localEntries + remoteEntriesByHost.values.flatMap { $0 })
+        }
     }
 
     // MARK: - Polling
@@ -71,44 +153,87 @@ final class PortStore {
         }
 
         scanTask?.cancel()
-        scanTask = Task { [scanner] in
+        scanTask = Task { [scanner, sshScanner] in
             isScanning = true
             defer { isScanning = false }
 
-            let result = await scanner.scan()
+            let remoteHosts = enabledSSHHosts.filter { shouldRefreshRemoteHost($0) }
+            async let localResult = scanner.scan()
+            async let remoteResult = sshScanner.scan(hosts: remoteHosts)
+            let result = await localResult
+            let remoteScans = await remoteResult
 
             guard !Task.isCancelled else { return }
+
+            applyRemoteScans(remoteScans, enabledHosts: enabledSSHHosts)
 
             switch result {
             case .success(let ports, let diag):
                 lastError = nil
                 lastDiagnostics = diag
                 pruneRecentlyKilled()
-                let filtered = ports.filter { !recentlyKilled.keys.contains($0.port) }
-                applyUpdate(filtered)
+                let filtered = ports.filter {
+                    !($0.isLocal && recentlyKilled.keys.contains($0.port))
+                }
+                applyUpdate(filtered + remoteEntriesByHost.values.flatMap { $0 })
 
             case .failure(let error, _):
                 lastError = error
                 Log.store.error("Scan error: \(error.localizedDescription)")
+                let localEntries = entries.filter(\.isLocal)
+                applyUpdate(localEntries + remoteEntriesByHost.values.flatMap { $0 })
             }
         }
     }
 
+    private func applyRemoteScans(_ scans: [SSHHostScan], enabledHosts: [SSHHost]) {
+        let enabledIDs = Set(enabledHosts.map(\.id))
+        remoteEntriesByHost = remoteEntriesByHost.filter { enabledIDs.contains($0.key) }
+        sshHostErrors = sshHostErrors.filter { enabledIDs.contains($0.key) }
+
+        for scan in scans {
+            guard enabledIDs.contains(scan.host.id) else { continue }
+            lastRemoteScanAt[scan.host.id] = scan.scannedAt
+            if let error = scan.errorDescription {
+                sshHostErrors[scan.host.id] = error
+                continue
+            }
+
+            sshHostErrors[scan.host.id] = nil
+            remoteEntriesByHost[scan.host.id] = scan.ports
+        }
+    }
+
+    private func shouldRefreshRemoteHost(_ host: SSHHost) -> Bool {
+        guard let lastScan = lastRemoteScanAt[host.id] else { return true }
+        return Date().timeIntervalSince(lastScan) >= Self.remoteRefreshInterval
+    }
+
     /// Smoothly updates entries, preserving existing items during transition.
     private func applyUpdate(_ newEntries: [ActivePort]) {
-        let oldIDs = Set(entries.map(\.port))
-        let newIDs = Set(newEntries.map(\.port))
+        let sortedEntries = newEntries.sorted { lhs, rhs in
+            if lhs.isLocal != rhs.isLocal { return lhs.isLocal }
+            if lhs.hostDisplayName != rhs.hostDisplayName {
+                return lhs.hostDisplayName.localizedStandardCompare(rhs.hostDisplayName) == .orderedAscending
+            }
+            return lhs.port < rhs.port
+        }
 
-        if oldIDs == newIDs && entries.count == newEntries.count {
+        let oldIDs = Set(entries.map(\.id))
+        let newIDs = Set(sortedEntries.map(\.id))
+
+        if oldIDs == newIDs && entries.count == sortedEntries.count {
             var needsUpdate = false
-            for (old, new) in zip(entries, newEntries) {
+            for (old, new) in zip(entries, sortedEntries) {
                 if old != new { needsUpdate = true; break }
             }
             if !needsUpdate { return }
         }
 
-        withAnimation(.easeInOut(duration: 0.25)) {
-            entries = newEntries
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            entries = sortedEntries
         }
     }
 
@@ -121,23 +246,38 @@ final class PortStore {
     }
 
     func killAllProcesses() {
-        let currentEntries = entries
+        let currentEntries = entries.filter(\.isLocal)
         guard !currentEntries.isEmpty else { return }
 
         for entry in currentEntries {
-            kill(entry.pid, SIGTERM)
+            guard let pid = entry.pid else { continue }
+            kill(pid, SIGTERM)
             recentlyKilled[entry.port] = Date()
         }
 
         Log.store.info("Killed \(currentEntries.count) processes")
         withAnimation(.easeInOut(duration: 0.25)) {
-            entries = []
+            entries.removeAll { $0.isLocal }
         }
     }
 
     func removeEntry(port: UInt16) {
         withAnimation(.easeInOut(duration: 0.3)) {
-            entries.removeAll { $0.port == port }
+            entries.removeAll { $0.isLocal && $0.port == port }
+        }
+    }
+
+    func removeEntry(id: String) {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            entries.removeAll { $0.id == id }
+        }
+    }
+
+    private func removeEntries(forHost hostID: String) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            entries.removeAll { $0.hostID == hostID }
         }
     }
 
@@ -200,8 +340,9 @@ final class PortStore {
         Last error: \(lastError?.localizedDescription ?? "none")
         Refresh interval: \(refreshInterval.rawValue)s
         Last scan: \(lastDiagnostics?.summary ?? "none")
+        SSH hosts: \(sshHosts.count) discovered, \(enabledSSHHostIDs.count) enabled
         Recently killed: \(recentlyKilled.keys.sorted().map(String.init).joined(separator: ", "))
-        Entries: \(entries.map { ":\($0.port) (\($0.projectName))" }.joined(separator: ", "))
+        Entries: \(entries.map { "\($0.hostDisplayName):\($0.port) (\($0.projectName))" }.joined(separator: ", "))
         ============================
         """
     }

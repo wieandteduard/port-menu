@@ -34,7 +34,7 @@ struct PortListView: View {
                 OnboardingView()
             }
         }
-        .frame(width: 340)
+        .frame(width: 360)
         .animation(.easeInOut(duration: 0.25), value: hasCompletedOnboarding)
     }
 }
@@ -136,6 +136,51 @@ struct PortHeaderView: View {
                             .toggleStyle(.switch)
                             .controlSize(.mini)
 
+                        if store.hasRemoteDiscovery {
+                            Divider()
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("SSH Hosts")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Reload") { store.reloadSSHHosts() }
+                                        .buttonStyle(.plain)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                }
+
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        ForEach(store.sshHosts) { host in
+                                            Toggle(isOn: Binding(
+                                                get: { store.isSSHHostEnabled(host) },
+                                                set: { store.setSSHHost(host, enabled: $0) }
+                                            )) {
+                                                VStack(alignment: .leading, spacing: 1) {
+                                                    Text(host.alias)
+                                                        .font(.caption)
+                                                    if let error = store.sshHostErrors[host.id] {
+                                                        Text(error)
+                                                            .font(.caption2)
+                                                            .foregroundStyle(.orange)
+                                                    } else if let hostName = host.hostName {
+                                                        Text(hostName)
+                                                            .font(.caption2)
+                                                            .foregroundStyle(.tertiary)
+                                                    }
+                                                }
+                                            }
+                                            .toggleStyle(.switch)
+                                            .controlSize(.mini)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 180)
+                            }
+                        }
+
                         Divider()
 
                         CheckForUpdatesView(updater: updater)
@@ -236,10 +281,99 @@ struct PortEntryListView: View {
     @Environment(PortStore.self) private var store
 
     var body: some View {
-        ForEach(Array(store.entries.enumerated()), id: \.element.id) { index, entry in
-            PortRow(entry: entry, showTopDivider: index > 0)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(groupedEntries.enumerated()), id: \.element.id) { groupIndex, group in
+                if groupIndex > 0 {
+                    Divider()
+                        .padding(.horizontal, 16)
+                }
+
+                PortHostHeader(group: group)
+
+                ForEach(Array(group.entries.enumerated()), id: \.element.id) { index, entry in
+                    PortRow(entry: entry, showTopDivider: index > 0)
+                }
+            }
         }
         .padding(.bottom, 6)
+    }
+
+    private var groupedEntries: [PortEntryGroup] {
+        var groups: [String: [ActivePort]] = [:]
+        for entry in store.entries {
+            groups[entry.hostID, default: []].append(entry)
+        }
+
+        return groups.map { hostID, entries in
+            let sortedEntries = entries.sorted { $0.port < $1.port }
+            let first = sortedEntries[0]
+            return PortEntryGroup(
+                id: hostID,
+                title: first.hostDisplayName,
+                source: first.source,
+                entries: sortedEntries
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.source != rhs.source { return lhs.source == .local }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+    }
+}
+
+struct PortEntryGroup: Identifiable {
+    let id: String
+    let title: String
+    let source: PortEndpointSource
+    let entries: [ActivePort]
+}
+
+struct PortHostHeader: View {
+    @Environment(PortStore.self) private var store
+    let group: PortEntryGroup
+    private var hostError: String? { store.sshHostErrors[group.id] }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(group.title)
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            Text(group.source == .local ? "local" : "ssh")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+
+            if let hostError {
+                Text("stale")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.orange.opacity(0.10)))
+                    .help(hostError)
+            }
+
+            Spacer()
+
+            if group.source == .ssh {
+                Button {
+                    store.refreshSSHHost(group.id)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 2)
     }
 }
 
@@ -337,7 +471,7 @@ struct PortRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Circle()
-                        .fill(.green)
+                        .fill(statusColor)
                         .frame(width: 6, height: 6)
                         .offset(y: -1)
 
@@ -349,9 +483,18 @@ struct PortRow: View {
                     Spacer()
 
                     HStack(spacing: 2) {
-                        HoverButton("Kill", role: .destructive) { killWithAnimation() }
-                        HoverButton("Open") {
-                            NSWorkspace.shared.open(entry.url)
+                        if entry.isLocal, entry.pid != nil {
+                            HoverButton("Kill", role: .destructive) { killWithAnimation() }
+                        }
+
+                        if entry.isRemote, entry.isLoopbackBound, entry.tunnelCommand != nil {
+                            HoverButton("Tunnel") {
+                                copyTunnelCommand()
+                            }
+                        } else {
+                            HoverButton("Open") {
+                                NSWorkspace.shared.open(entry.url)
+                            }
                         }
                     }
                     .opacity(isHovered ? 1 : 0)
@@ -368,6 +511,12 @@ struct PortRow: View {
                                 .truncationMode(.middle)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                    }
+
+                    if entry.isRemote {
+                        Text(entry.hostDisplayName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
 
                     Text(":\(String(entry.port))")
@@ -403,24 +552,47 @@ struct PortRow: View {
             Button("Copy Port") {
                 PortStore.copyToClipboard(String(entry.port))
             }
-            Divider()
-            Button("Open in Browser") {
-                NSWorkspace.shared.open(entry.url)
+            if entry.isRemote, entry.isLoopbackBound {
+                Divider()
+                Button("Copy Tunnel Command") {
+                    copyTunnelCommand()
+                }
+            } else {
+                Divider()
+                Button("Open in Browser") {
+                    NSWorkspace.shared.open(entry.url)
+                }
             }
-            Divider()
-            Button("Kill Server", role: .destructive) { killWithAnimation() }
+            if entry.isLocal, entry.pid != nil {
+                Divider()
+                Button("Kill Server", role: .destructive) { killWithAnimation() }
+            }
         }
     }
 
     private func killWithAnimation() {
-        store.killProcess(pid: entry.pid, port: entry.port)
+        guard let pid = entry.pid else { return }
+        store.killProcess(pid: pid, port: entry.port)
         withAnimation(.easeOut(duration: 0.3)) {
             slidOut = true
         }
         Task {
             try? await Task.sleep(for: .seconds(0.3))
-            store.removeEntry(port: entry.port)
+            store.removeEntry(id: entry.id)
         }
+    }
+
+    private func copyTunnelCommand() {
+        if let command = entry.tunnelCommand {
+            PortStore.copyToClipboard(command)
+        }
+    }
+
+    private var statusColor: Color {
+        if entry.isRemote, store.sshHostErrors[entry.hostID] != nil {
+            return .orange
+        }
+        return .green
     }
 }
 

@@ -33,7 +33,7 @@ struct PorterApp: App {
                       : "circle.fill")
                     .font(.system(size: 5.5))
                     .foregroundStyle(statusColor)
-                Text(store.entries.count, format: .number)
+                Text("Ports \(store.entries.count)")
                     .fontDesign(.monospaced)
             }
             .onAppear { store.ensurePolling() }
