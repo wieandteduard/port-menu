@@ -326,6 +326,23 @@ struct PortRow: View {
     @Environment(PortStore.self) private var store
     @State private var isHovered = false
     @State private var slidOut = false
+    @AppStorage("httpsPorts") private var httpsPortsRaw = ""
+
+    private var httpsKey: String { "\(entry.projectName)|\(entry.port)" }
+
+    private var useHTTPS: Bool {
+        httpsPortsRaw.split(separator: ",").contains { String($0) == httpsKey }
+    }
+
+    private func setUseHTTPS(_ enabled: Bool) {
+        var keys = Set(httpsPortsRaw.split(separator: ",").filter { !$0.isEmpty }.map(String.init))
+        if enabled { keys.insert(httpsKey) } else { keys.remove(httpsKey) }
+        httpsPortsRaw = keys.sorted().joined(separator: ",")
+    }
+
+    private var openURL: URL {
+        URL(string: entry.url.absoluteString.replacingOccurrences(of: "http://", with: useHTTPS ? "https://" : "http://"))!
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -351,7 +368,7 @@ struct PortRow: View {
                     HStack(spacing: 2) {
                         HoverButton("Kill", role: .destructive) { killWithAnimation() }
                         HoverButton("Open") {
-                            NSWorkspace.shared.open(entry.url)
+                            NSWorkspace.shared.open(openURL)
                         }
                     }
                     .opacity(isHovered ? 1 : 0)
@@ -373,6 +390,12 @@ struct PortRow: View {
                     Text(":\(String(entry.port))")
                         .fontDesign(.monospaced)
                         .foregroundStyle(.tertiary)
+
+                    Button { setUseHTTPS(!useHTTPS) } label: {
+                        Text(useHTTPS ? "HTTPS" : "HTTP")
+                            .foregroundStyle(useHTTPS ? Color.yellow : Color.secondary.opacity(0.45))
+                    }
+                    .buttonStyle(.plain)
 
                     Spacer()
 
