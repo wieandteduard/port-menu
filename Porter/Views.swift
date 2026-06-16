@@ -360,7 +360,15 @@ struct PortRow: View {
                 }
 
                 HStack(spacing: 6) {
-                    if !entry.branch.isEmpty {
+                    if entry.isContainer {
+                        HStack(spacing: 3) {
+                            Image(systemName: "shippingbox")
+                            Text(entry.branch.isEmpty ? "container" : entry.branch)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else if !entry.branch.isEmpty {
                         HStack(spacing: 3) {
                             Image(systemName: "arrow.triangle.branch")
                             Text(entry.branch)

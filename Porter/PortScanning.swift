@@ -72,12 +72,88 @@ struct LivePortScanner: PortScanning {
         }
 
         let pids = Set(parsed.map(\.pid))
+        let hasContainerPorts = parsed.contains {
+            Self.containerRuntimeName(for: $0.processName) != nil
+        }
         async let cwdResult = resolveCWDs(pids: pids)
         async let startTimeResult = resolveStartTimes(pids: pids)
-        let (cwds, startTimes) = await (cwdResult, startTimeResult)
+        async let containerResult = resolveContainers(enabled: hasContainerPorts)
+        let (cwds, startTimes, containers) = await (cwdResult, startTimeResult, containerResult)
 
         return await resolveProjects(parsed: parsed, cwds: cwds,
-                                     startTimes: startTimes)
+                                     startTimes: startTimes, containers: containers)
+    }
+
+    // MARK: - Container Resolution
+
+    struct ContainerInfo: Sendable {
+        let project: String   // compose project, or container name if standalone
+        let service: String   // compose service name (empty for standalone containers)
+    }
+
+    // Common install locations for the `docker`-compatible CLI. The same binary
+    // works for Docker Desktop and OrbStack (which the active context points at).
+    private static func dockerExecutable() -> String? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path()
+        let candidates = [
+            "/usr/local/bin/docker",
+            "/opt/homebrew/bin/docker",
+            "\(home)/.orbstack/bin/docker",
+            "/Applications/OrbStack.app/Contents/MacOS/xbin/docker",
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+        ]
+        return candidates.first { fm.isExecutableFile(atPath: $0) }
+    }
+
+    /// Maps published host ports to their container's compose project/service by
+    /// querying the container CLI. Best-effort: returns empty if no runtime ports
+    /// were seen, the CLI is missing, or the daemon is unreachable.
+    private func resolveContainers(enabled: Bool) async -> [UInt16: ContainerInfo] {
+        guard enabled, let docker = Self.dockerExecutable() else { return [:] }
+        let format = #"{{.Names}}\t{{.Ports}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}"#
+        guard let output = try? await runShell(
+            docker, args: ["ps", "--no-trunc", "--format", format],
+            timeout: 5
+        ) else {
+            if Log.isVerbose { log.debug("docker ps lookup failed or timed out") }
+            return [:]
+        }
+        return Self.parseContainerOutput(output)
+    }
+
+    /// Parses the tab-separated `docker ps` output into a host-port → container map.
+    static func parseContainerOutput(_ output: String) -> [UInt16: ContainerInfo] {
+        var result: [UInt16: ContainerInfo] = [:]
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let cols = line.components(separatedBy: "\t")
+            guard cols.count >= 2 else { continue }
+            let name = cols[0].trimmingCharacters(in: .whitespaces)
+            let portsField = cols[1]
+            let projectLabel = cols.count > 2 ? cols[2].trimmingCharacters(in: .whitespaces) : ""
+            let serviceLabel = cols.count > 3 ? cols[3].trimmingCharacters(in: .whitespaces) : ""
+            let info = ContainerInfo(
+                project: projectLabel.isEmpty ? name : projectLabel,
+                service: serviceLabel
+            )
+            for port in parseContainerHostPorts(portsField) {
+                result[port] = info
+            }
+        }
+        return result
+    }
+
+    /// Extracts published host ports from a docker `Ports` field, e.g.
+    /// "0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp" → [3000]. Unpublished
+    /// ports like "8000/tcp" (no "->") are ignored.
+    static func parseContainerHostPorts(_ portsField: String) -> [UInt16] {
+        var seen = Set<UInt16>()
+        var ports: [UInt16] = []
+        for match in portsField.matches(of: #/:(\d{1,5})->/#) {
+            guard let port = UInt16(match.1), seen.insert(port).inserted else { continue }
+            ports.append(port)
+        }
+        return ports
     }
 
     // MARK: - lsof Parsing (static for testability)
@@ -180,7 +256,8 @@ struct LivePortScanner: PortScanning {
     private func resolveProjects(
         parsed: [ParsedPort],
         cwds: [Int32: String],
-        startTimes: [Int32: Date]
+        startTimes: [Int32: Date],
+        containers: [UInt16: ContainerInfo]
     ) async -> [ActivePort] {
         var gitRoots: [String: URL] = [:]
         var branches: [String: String] = [:]
@@ -219,21 +296,34 @@ struct LivePortScanner: PortScanning {
             let cwd = cwds[info.pid]
             let gitRoot = cwd.flatMap { gitRoots[$0] }
             let rootPath = gitRoot?.path()
+            let isContainerRuntime = Self.containerRuntimeName(for: info.processName) != nil
+            let container = isContainerRuntime ? containers[info.port] : nil
 
-            if gitRoot == nil, !Self.shouldKeepFallbackProcess(processName: info.processName, cwd: cwd) {
+            if gitRoot == nil, !isContainerRuntime,
+               !Self.shouldKeepFallbackProcess(processName: info.processName, cwd: cwd) {
                 if Log.isVerbose {
                     Log.scanner.debug("Skipping non-project process '\(info.processName)' on port \(info.port)")
                 }
                 return nil
             }
 
-            let projectName = Self.displayName(
-                processName: info.processName,
-                cwd: cwd,
-                gitRoot: gitRoot
-            )
+            let projectName: String
+            let branch: String
+            if let container {
+                // Container runtime port matched to a running container: prefer the
+                // compose project/service over the generic runtime label.
+                projectName = container.project
+                branch = container.service
+            } else {
+                projectName = Self.displayName(
+                    processName: info.processName,
+                    cwd: cwd,
+                    gitRoot: gitRoot
+                )
+                branch = rootPath.flatMap { branches[$0] } ?? ""
+            }
 
-            if gitRoot == nil, Log.isVerbose {
+            if gitRoot == nil, container == nil, Log.isVerbose {
                 Log.scanner.debug("Using fallback label '\(projectName)' for PID \(info.pid) on port \(info.port)")
             }
 
@@ -241,8 +331,9 @@ struct LivePortScanner: PortScanning {
                 port: info.port,
                 pid: info.pid,
                 projectName: projectName,
-                branch: rootPath.flatMap { branches[$0] } ?? "",
-                startTime: startTimes[info.pid]
+                branch: branch,
+                startTime: startTimes[info.pid],
+                isContainer: isContainerRuntime
             )
         }
     }
@@ -252,8 +343,8 @@ struct LivePortScanner: PortScanning {
             return gitRoot.lastPathComponent
         }
 
-        if isDockerProcess(processName) {
-            return "Docker"
+        if let runtime = containerRuntimeName(for: processName) {
+            return runtime
         }
 
         if let cwd {
@@ -272,7 +363,7 @@ struct LivePortScanner: PortScanning {
             return true
         }
 
-        if isDockerProcess(normalized) {
+        if containerRuntimeName(for: normalized) != nil {
             return true
         }
 
@@ -292,11 +383,19 @@ struct LivePortScanner: PortScanning {
         return false
     }
 
+    // Returns the display label for a container runtime if `name` is one, else nil.
     // lsof truncates COMMAND to 9 chars by default, so
-    // "com.docker.backend" → "com.docke", "docker-proxy" → "docker-pr"
-    static func isDockerProcess(_ name: String) -> Bool {
+    // "com.docker.backend" → "com.docke", "docker-proxy" → "docker-pr".
+    // OrbStack ("OrbStack", 8 chars) is not truncated.
+    static func containerRuntimeName(for name: String) -> String? {
         let lower = name.lowercased()
-        return lower.contains("docker") || lower.hasPrefix("com.dock") || lower.hasPrefix("vpnkit")
+        if lower.contains("orbstack") {
+            return "OrbStack"
+        }
+        if lower.contains("docker") || lower.hasPrefix("com.dock") || lower.hasPrefix("vpnkit") {
+            return "Docker"
+        }
+        return nil
     }
 
     static func isMeaningfulDirectoryName(_ name: String) -> Bool {

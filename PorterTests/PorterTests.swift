@@ -399,6 +399,71 @@ struct DockerDisplayNameTests {
         )
         #expect(name == "app")
     }
+
+    @Test func orbStackShowsOrbStack() {
+        let name = LivePortScanner.displayName(
+            processName: "OrbStack",
+            cwd: "/",
+            gitRoot: nil
+        )
+        #expect(name == "OrbStack")
+    }
+}
+
+// MARK: - Container Runtime Tests
+
+struct ContainerRuntimeTests {
+
+    @Test func keepsOrbStackWithoutGitRoot() {
+        #expect(LivePortScanner.shouldKeepFallbackProcess(
+            processName: "OrbStack",
+            cwd: "/"
+        ))
+    }
+
+    @Test func recognizesRuntimes() {
+        #expect(LivePortScanner.containerRuntimeName(for: "OrbStack") == "OrbStack")
+        #expect(LivePortScanner.containerRuntimeName(for: "com.docke") == "Docker")
+        #expect(LivePortScanner.containerRuntimeName(for: "docker-pr") == "Docker")
+        #expect(LivePortScanner.containerRuntimeName(for: "vpnkit-bridge") == "Docker")
+        #expect(LivePortScanner.containerRuntimeName(for: "node") == nil)
+    }
+
+    @Test func parsesPublishedHostPorts() {
+        let ports = LivePortScanner.parseContainerHostPorts(
+            "0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp"
+        )
+        #expect(ports == [3000])
+    }
+
+    @Test func parsesRemappedHostPort() {
+        let ports = LivePortScanner.parseContainerHostPorts(
+            "0.0.0.0:55432->5432/tcp, [::]:55432->5432/tcp"
+        )
+        #expect(ports == [55432])
+    }
+
+    @Test func ignoresUnpublishedPorts() {
+        #expect(LivePortScanner.parseContainerHostPorts("8000/tcp").isEmpty)
+    }
+
+    @Test func mapsComposeProjectAndService() {
+        let output = """
+        myapp-web-1\t0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp\tmyapp\tweb
+        myapp-db-1\t0.0.0.0:55432->5432/tcp\tmyapp\tdb
+        """
+        let map = LivePortScanner.parseContainerOutput(output)
+        #expect(map[3000]?.project == "myapp")
+        #expect(map[3000]?.service == "web")
+        #expect(map[55432]?.service == "db")
+    }
+
+    @Test func standaloneContainerFallsBackToName() {
+        let output = "my-redis\t0.0.0.0:6379->6379/tcp\t\t"
+        let map = LivePortScanner.parseContainerOutput(output)
+        #expect(map[6379]?.project == "my-redis")
+        #expect(map[6379]?.service == "")
+    }
 }
 
 // MARK: - PortStore Tests

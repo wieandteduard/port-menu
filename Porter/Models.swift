@@ -9,18 +9,22 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
     let projectName: String
     let branch: String
     let startTime: Date?
+    /// True when this port is published by a container runtime (Docker/OrbStack).
+    /// Used to distinguish container services from local git projects in the UI.
+    let isContainer: Bool
 
     var url: URL {
         URL(string: "http://localhost:\(port)")!
     }
 
-    init(port: UInt16, pid: Int32, projectName: String, branch: String, startTime: Date?) {
+    init(port: UInt16, pid: Int32, projectName: String, branch: String, startTime: Date?, isContainer: Bool = false) {
         self.id = "\(port)-\(pid)"
         self.port = port
         self.pid = pid
         self.projectName = projectName
         self.branch = branch
         self.startTime = startTime
+        self.isContainer = isContainer
     }
 }
 
