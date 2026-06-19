@@ -70,6 +70,7 @@ struct PortHeaderView: View {
     @State private var menuHovered = false
     @State private var showMenu = false
     @State private var launchAtLoginError: String?
+    @AppStorage("hideMenuBarWhenEmpty") private var hideMenuBarWhenEmpty = false
     var updater: SPUUpdater
 
     private var appVersion: String {
@@ -133,6 +134,10 @@ struct PortHeaderView: View {
                             .foregroundStyle(.tertiary)
 
                         Toggle("Launch at Login", isOn: launchAtLogin)
+                            .toggleStyle(.switch)
+                            .controlSize(.mini)
+
+                        Toggle("Hide Icon When Empty", isOn: $hideMenuBarWhenEmpty)
                             .toggleStyle(.switch)
                             .controlSize(.mini)
 
