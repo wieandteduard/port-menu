@@ -14,6 +14,8 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         URL(string: "http://localhost:\(port)")!
     }
 
+    var canKill: Bool { pid > 0 }
+
     init(port: UInt16, pid: Int32, projectName: String, branch: String, startTime: Date?) {
         self.id = "\(port)-\(pid)"
         self.port = port

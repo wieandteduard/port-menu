@@ -99,7 +99,7 @@ struct PortHeaderView: View {
             Spacer()
 
             HStack(spacing: 2) {
-                if !store.entries.isEmpty {
+                if store.entries.contains(where: \.canKill) {
                     HeaderControlButton(
                         tooltip: nil,
                         destructive: true,
@@ -349,7 +349,9 @@ struct PortRow: View {
                     Spacer()
 
                     HStack(spacing: 2) {
-                        HoverButton("Kill", role: .destructive) { killWithAnimation() }
+                        if entry.canKill {
+                            HoverButton("Kill", role: .destructive) { killWithAnimation() }
+                        }
                         HoverButton("Open") {
                             NSWorkspace.shared.open(entry.url)
                         }
@@ -407,8 +409,10 @@ struct PortRow: View {
             Button("Open in Browser") {
                 NSWorkspace.shared.open(entry.url)
             }
-            Divider()
-            Button("Kill Server", role: .destructive) { killWithAnimation() }
+            if entry.canKill {
+                Divider()
+                Button("Kill Server", role: .destructive) { killWithAnimation() }
+            }
         }
     }
 

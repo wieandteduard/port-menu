@@ -115,13 +115,14 @@ final class PortStore {
     // MARK: - Actions
 
     func killProcess(pid: Int32, port: UInt16) {
+        guard pid > 0 else { return }
         kill(pid, SIGTERM)
         recentlyKilled[port] = Date()
         Log.store.info("Killed PID \(pid) on port \(port)")
     }
 
     func killAllProcesses() {
-        let currentEntries = entries
+        let currentEntries = entries.filter(\.canKill)
         guard !currentEntries.isEmpty else { return }
 
         for entry in currentEntries {

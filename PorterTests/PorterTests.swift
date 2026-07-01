@@ -144,6 +144,24 @@ struct LsofParserTests {
     }
 }
 
+// MARK: - Docker Parser Tests
+
+struct DockerParserTests {
+
+    @Test func parsesPublishedPorts() {
+        let output = """
+        gigi-api-gateway\t0.0.0.0:3001->3000/tcp, [::]:3001->3000/tcp
+        filtergenie-backend-1\t127.0.0.1:8000->8000/tcp
+        redis\t6379/tcp
+        """
+
+        let parsed = LivePortScanner.parseDockerPsOutput(output)
+        #expect(parsed.count == 2)
+        #expect(parsed[3001] == "gigi-api-gateway")
+        #expect(parsed[8000] == "filtergenie-backend-1")
+    }
+}
+
 // MARK: - Model Tests
 
 struct ActivePortTests {
@@ -164,6 +182,11 @@ struct ActivePortTests {
         let a = ActivePort(port: 3000, pid: 100, projectName: "test", branch: "main", startTime: time)
         let b = ActivePort(port: 3000, pid: 100, projectName: "test", branch: "main", startTime: time)
         #expect(a == b)
+    }
+
+    @Test func dockerMetadataPortCannotKill() {
+        let port = ActivePort(port: 3000, pid: -1, projectName: "api", branch: "", startTime: nil)
+        #expect(!port.canKill)
     }
 }
 
@@ -367,6 +390,7 @@ struct FallbackFilterTests {
             cwd: "/"
         ))
     }
+
 }
 
 // MARK: - Docker Display Name Tests

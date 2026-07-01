@@ -74,10 +74,12 @@ struct LivePortScanner: PortScanning {
         let pids = Set(parsed.map(\.pid))
         async let cwdResult = resolveCWDs(pids: pids)
         async let startTimeResult = resolveStartTimes(pids: pids)
-        let (cwds, startTimes) = await (cwdResult, startTimeResult)
+        async let dockerNamesResult = resolveDockerPortNames()
+        let (cwds, startTimes, dockerNames) = await (cwdResult, startTimeResult, dockerNamesResult)
 
         return await resolveProjects(parsed: parsed, cwds: cwds,
-                                     startTimes: startTimes)
+                                     startTimes: startTimes,
+                                     dockerNames: dockerNames)
     }
 
     // MARK: - lsof Parsing (static for testability)
@@ -119,6 +121,30 @@ struct LivePortScanner: PortScanning {
         }
 
         return results.sorted { $0.port < $1.port }
+    }
+
+    static func parseDockerPsOutput(_ output: String) -> [UInt16: String] {
+        var result: [UInt16: String] = [:]
+
+        for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let cols = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
+            guard cols.count == 2 else { continue }
+
+            for mapping in cols[1].split(separator: ",") {
+                guard let port = hostPort(fromDockerMapping: String(mapping)) else { continue }
+                result[port] = String(cols[0])
+            }
+        }
+
+        return result
+    }
+
+    private static func hostPort(fromDockerMapping mapping: String) -> UInt16? {
+        let trimmed = mapping.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let arrow = trimmed.range(of: "->") else { return nil }
+
+        let host = trimmed[..<arrow.lowerBound]
+        return host.split(separator: ":").last.flatMap { UInt16($0) }
     }
 
     // MARK: - CWD Resolution
@@ -175,12 +201,28 @@ struct LivePortScanner: PortScanning {
         return result
     }
 
+    // MARK: - Docker Resolution
+
+    private func resolveDockerPortNames() async -> [UInt16: String] {
+        guard let output = try? await runShell(
+            "/usr/bin/env",
+            args: ["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+            timeout: 3,
+            environment: [
+                "PATH": "/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            ]
+        ) else { return [:] }
+
+        return Self.parseDockerPsOutput(output)
+    }
+
     // MARK: - Git Resolution
 
     private func resolveProjects(
         parsed: [ParsedPort],
         cwds: [Int32: String],
-        startTimes: [Int32: Date]
+        startTimes: [Int32: Date],
+        dockerNames: [UInt16: String]
     ) async -> [ActivePort] {
         var gitRoots: [String: URL] = [:]
         var branches: [String: String] = [:]
@@ -227,7 +269,8 @@ struct LivePortScanner: PortScanning {
                 return nil
             }
 
-            let projectName = Self.displayName(
+            let dockerName = dockerNames[info.port]
+            let projectName = dockerName ?? Self.displayName(
                 processName: info.processName,
                 cwd: cwd,
                 gitRoot: gitRoot
@@ -239,10 +282,10 @@ struct LivePortScanner: PortScanning {
 
             return ActivePort(
                 port: info.port,
-                pid: info.pid,
+                pid: dockerName == nil ? info.pid : -1,
                 projectName: projectName,
                 branch: rootPath.flatMap { branches[$0] } ?? "",
-                startTime: startTimes[info.pid]
+                startTime: dockerName == nil ? startTimes[info.pid] : nil
             )
         }
     }
