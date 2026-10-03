@@ -135,6 +135,24 @@ final class PortStore {
         }
     }
 
+    /// Stops every currently visible server that belongs to one project.
+    /// Looking up the entries here, rather than relying on a view snapshot, keeps the
+    /// action correct if a scan finishes while the confirmation dialog is open.
+    func killProcesses(inProjectWithIdentifier projectIdentifier: String) {
+        let projectEntries = entries.filter { $0.projectIdentifier == projectIdentifier }
+        guard !projectEntries.isEmpty else { return }
+
+        for entry in projectEntries {
+            kill(entry.pid, SIGTERM)
+            recentlyKilled[entry.port] = Date()
+        }
+
+        Log.store.info("Killed \(projectEntries.count) processes in project \(projectIdentifier)")
+        withAnimation(.easeInOut(duration: 0.25)) {
+            entries.removeAll { $0.projectIdentifier == projectIdentifier }
+        }
+    }
+
     func removeEntry(port: UInt16) {
         withAnimation(.easeInOut(duration: 0.3)) {
             entries.removeAll { $0.port == port }

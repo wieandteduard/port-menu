@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import os
 
@@ -74,10 +75,11 @@ struct LivePortScanner: PortScanning {
         let pids = Set(parsed.map(\.pid))
         async let cwdResult = resolveCWDs(pids: pids)
         async let startTimeResult = resolveStartTimes(pids: pids)
+        let memoryUsage = resolveMemoryUsage(pids: pids)
         let (cwds, startTimes) = await (cwdResult, startTimeResult)
 
         return await resolveProjects(parsed: parsed, cwds: cwds,
-                                     startTimes: startTimes)
+                                     startTimes: startTimes, memoryUsage: memoryUsage)
     }
 
     // MARK: - lsof Parsing (static for testability)
@@ -175,12 +177,45 @@ struct LivePortScanner: PortScanning {
         return result
     }
 
+    // MARK: - Memory Usage Resolution
+
+    /// Reads each process once per scan. `ri_phys_footprint` is macOS's memory-footprint
+    /// metric and avoids the unit parsing and extra process overhead of calling `ps`.
+    private func resolveMemoryUsage(pids: Set<Int32>) -> [Int32: UInt64] {
+        var result: [Int32: UInt64] = [:]
+
+        for pid in pids {
+            guard let memoryBytes = Self.memoryUsage(for: pid) else {
+                if Log.isVerbose {
+                    log.debug("Couldn't read memory usage for PID \(pid)")
+                }
+                continue
+            }
+
+            result[pid] = memoryBytes
+        }
+
+        return result
+    }
+
+    static func memoryUsage(for pid: Int32) -> UInt64? {
+        var usage = rusage_info_current()
+        let status = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+            }
+        }
+
+        return status == 0 ? usage.ri_phys_footprint : nil
+    }
+
     // MARK: - Git Resolution
 
     private func resolveProjects(
         parsed: [ParsedPort],
         cwds: [Int32: String],
-        startTimes: [Int32: Date]
+        startTimes: [Int32: Date],
+        memoryUsage: [Int32: UInt64]
     ) async -> [ActivePort] {
         var gitRoots: [String: URL] = [:]
         var branches: [String: String] = [:]
@@ -241,8 +276,10 @@ struct LivePortScanner: PortScanning {
                 port: info.port,
                 pid: info.pid,
                 projectName: projectName,
+                projectIdentifier: rootPath ?? cwd ?? "process:\(info.processName)",
                 branch: rootPath.flatMap { branches[$0] } ?? "",
-                startTime: startTimes[info.pid]
+                startTime: startTimes[info.pid],
+                memoryBytes: memoryUsage[info.pid]
             )
         }
     }

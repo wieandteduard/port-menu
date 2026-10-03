@@ -3,6 +3,10 @@ import os
 
 @MainActor
 func moveToApplicationsIfNeeded() {
+    // Local Xcode and test builds are intentionally run outside Applications.
+    // Only release builds should offer to install themselves system-wide.
+    #if !DEBUG
+
     let bundlePath = Bundle.main.bundlePath
     let destinationURL = URL(filePath: "/Applications/Port Menu.app")
     let fileManager = FileManager.default
@@ -91,6 +95,7 @@ func moveToApplicationsIfNeeded() {
         Log.lifecycle.error("Failed to move app to Applications: \(error.localizedDescription)")
         showApplicationsInstallError(error)
     }
+    #endif
 }
 
 @MainActor

@@ -1,3 +1,4 @@
+import AppKit
 import ServiceManagement
 import Sparkle
 import SwiftUI
@@ -234,12 +235,30 @@ struct HeaderButtonStyle: ButtonStyle {
 
 struct PortEntryListView: View {
     @Environment(PortStore.self) private var store
+    @State private var collapsedProjectIDs: Set<String> = []
 
     var body: some View {
-        ForEach(Array(store.entries.enumerated()), id: \.element.id) { index, entry in
-            PortRow(entry: entry, showTopDivider: index > 0)
+        let groups = store.entries.groupedByProject()
+
+        ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
+            ProjectPortGroupView(
+                group: group,
+                showTopDivider: index > 0,
+                isCollapsed: collapsedProjectIDs.contains(group.id),
+                toggleCollapsed: { toggleCollapsed(group.id) }
+            )
         }
         .padding(.bottom, 6)
+    }
+
+    private func toggleCollapsed(_ projectID: String) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            if collapsedProjectIDs.contains(projectID) {
+                collapsedProjectIDs.remove(projectID)
+            } else {
+                collapsedProjectIDs.insert(projectID)
+            }
+        }
     }
 }
 
@@ -318,14 +337,15 @@ struct PortErrorStateView: View {
     }
 }
 
-// MARK: - Port Row
+// MARK: - Project Port Group
 
-struct PortRow: View {
-    let entry: ActivePort
-    let showTopDivider: Bool
+struct ProjectPortGroupView: View {
     @Environment(PortStore.self) private var store
-    @State private var isHovered = false
-    @State private var slidOut = false
+    @State private var isShowingKillConfirmation = false
+    let group: ProjectPortGroup
+    let showTopDivider: Bool
+    let isCollapsed: Bool
+    let toggleCollapsed: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -334,55 +354,138 @@ struct PortRow: View {
                     .padding(.horizontal, 16)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Circle()
-                        .fill(.green)
-                        .frame(width: 6, height: 6)
-                        .offset(y: -1)
-
-                    Text(entry.projectName)
-                        .font(.system(.body, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Spacer()
-
-                    HStack(spacing: 2) {
-                        HoverButton("Kill", role: .destructive) { killWithAnimation() }
-                        HoverButton("Open") {
-                            NSWorkspace.shared.open(entry.url)
-                        }
-                    }
-                    .opacity(isHovered ? 1 : 0)
-                    .scaleEffect(isHovered ? 1 : 0.85, anchor: .trailing)
-                    .offset(x: isHovered ? 0 : 6)
-                }
-
-                HStack(spacing: 6) {
-                    if !entry.branch.isEmpty {
-                        HStack(spacing: 3) {
-                            Image(systemName: "arrow.triangle.branch")
-                            Text(entry.branch)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-
-                    Text(":\(String(entry.port))")
-                        .fontDesign(.monospaced)
-                        .foregroundStyle(.tertiary)
-
-                    Spacer()
-
-                    if let start = entry.startTime {
-                        Text(formatUptime(from: start))
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Button(action: toggleCollapsed) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.tertiary)
+                            .frame(width: 10)
+
+                        Circle()
+                            .fill(.green)
+                            .frame(width: 6, height: 6)
+                            .offset(y: -1)
+
+                        Text(group.projectName)
+                            .font(.system(.body, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+
+                        if !group.branch.isEmpty {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.triangle.branch")
+                                Text(group.branch)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        if group.entries.count > 1 {
+                            Text("\(group.entries.count) ports")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(group.projectName), \(group.entries.count) ports")
+                .accessibilityHint(isCollapsed ? "Expand ports" : "Collapse ports")
+
+                HoverButton("Kill", role: .destructive) {
+                    isShowingKillConfirmation = true
+                }
+                .accessibilityLabel("Kill all servers in \(group.projectName)")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+
+            if isShowingKillConfirmation {
+                HStack(spacing: 8) {
+                    Text("Stop \(group.entries.count) \(group.entries.count == 1 ? "server" : "servers")?")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button("Cancel") {
+                        isShowingKillConfirmation = false
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button(
+                        "Kill \(group.entries.count)",
+                        role: .destructive
+                    ) {
+                        isShowingKillConfirmation = false
+                        store.killProcesses(inProjectWithIdentifier: group.id)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .tint(.red)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            if !isCollapsed {
+                ForEach(group.entries) { entry in
+                    PortRow(entry: entry)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Port Row
+
+struct PortRow: View {
+    let entry: ActivePort
+    @Environment(PortStore.self) private var store
+    @State private var isHovered = false
+    @State private var slidOut = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Divider()
+                .padding(.horizontal, 16)
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(":\(String(entry.port))")
+                    .font(.system(.body, weight: .medium))
+                    .fontDesign(.monospaced)
+
+                Spacer()
+
+                if let memoryBytes = entry.memoryBytes {
+                    Text(formatMemory(bytes: memoryBytes))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
+                if let start = entry.startTime {
+                    Text(formatUptime(from: start))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+
+                HStack(spacing: 2) {
+                    HoverButton("Kill", role: .destructive) { killWithAnimation() }
+                    HoverButton("Open") {
+                        NSWorkspace.shared.open(entry.url)
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .opacity(isHovered ? 1 : 0)
+                .scaleEffect(isHovered ? 1 : 0.85, anchor: .trailing)
+                .offset(x: isHovered ? 0 : 6)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

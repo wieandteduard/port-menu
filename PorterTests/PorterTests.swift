@@ -1,3 +1,4 @@
+import Darwin
 import Testing
 import Foundation
 @testable import Port_Menu
@@ -164,6 +165,79 @@ struct ActivePortTests {
         let a = ActivePort(port: 3000, pid: 100, projectName: "test", branch: "main", startTime: time)
         let b = ActivePort(port: 3000, pid: 100, projectName: "test", branch: "main", startTime: time)
         #expect(a == b)
+    }
+
+    @Test func retainsOptionalMemoryUsage() {
+        let port = ActivePort(
+            port: 3000,
+            pid: 123,
+            projectName: "test",
+            branch: "main",
+            startTime: nil,
+            memoryBytes: 128 * 1_024 * 1_024
+        )
+
+        #expect(port.memoryBytes == 128 * 1_024 * 1_024)
+    }
+}
+
+// MARK: - Memory Formatter Tests
+
+struct MemoryFormatterTests {
+
+    @Test func formatsMemoryForDisplay() {
+        #expect(!formatMemory(bytes: 128 * 1_024 * 1_024).isEmpty)
+    }
+
+    @Test func readsCurrentProcessMemoryUsage() {
+        let memoryBytes = LivePortScanner.memoryUsage(for: getpid())
+
+        #expect(memoryBytes != nil)
+        #expect(memoryBytes ?? 0 > 0)
+    }
+}
+
+// MARK: - Project Port Grouping Tests
+
+struct ProjectPortGroupingTests {
+
+    @Test func groupsPortsFromTheSameProjectAndSortsTheirPorts() {
+        let entries = [
+            ActivePort(port: 8080, pid: 2, projectName: "app", projectIdentifier: "/work/app", branch: "main", startTime: nil),
+            ActivePort(port: 3000, pid: 1, projectName: "app", projectIdentifier: "/work/app", branch: "main", startTime: nil),
+            ActivePort(port: 5173, pid: 3, projectName: "api", projectIdentifier: "/work/api", branch: "develop", startTime: nil)
+        ]
+
+        let groups = entries.groupedByProject()
+
+        #expect(groups.count == 2)
+        #expect(groups[0].projectName == "api")
+        #expect(groups[1].projectName == "app")
+        #expect(groups[1].entries.map(\.port) == [3000, 8080])
+    }
+
+    @Test func doesNotMergeProjectsWithTheSameDisplayName() {
+        let entries = [
+            ActivePort(port: 3000, pid: 1, projectName: "web", projectIdentifier: "/work/client/web", branch: "main", startTime: nil),
+            ActivePort(port: 5173, pid: 2, projectName: "web", projectIdentifier: "/work/admin/web", branch: "main", startTime: nil)
+        ]
+
+        let groups = entries.groupedByProject()
+
+        #expect(groups.count == 2)
+        #expect(groups.map(\.id) == ["/work/admin/web", "/work/client/web"])
+    }
+
+    @Test func usesTheProvidedFallbackIdentityForNonGitProcesses() {
+        let entries = [
+            ActivePort(port: 3000, pid: 1, projectName: "python", projectIdentifier: "/work/service", branch: "", startTime: nil),
+            ActivePort(port: 8000, pid: 2, projectName: "python", projectIdentifier: "/work/service", branch: "", startTime: nil)
+        ]
+
+        let groups = entries.groupedByProject()
+
+        #expect(groups.count == 1)
+        #expect(groups[0].entries.map(\.port) == [3000, 8000])
     }
 }
 
@@ -468,6 +542,27 @@ struct DockerDisplayNameTests {
         store.refresh()
         try await Task.sleep(nanoseconds: 200_000_000)
         #expect(store.entries.isEmpty)
+    }
+
+    @Test @MainActor func killProjectProcessesOnlyRemovesThatProject() async throws {
+        let ports = [
+            ActivePort(port: 3000, pid: 99996, projectName: "web", projectIdentifier: "/work/web", branch: "", startTime: nil),
+            ActivePort(port: 5173, pid: 99995, projectName: "web", projectIdentifier: "/work/web", branch: "", startTime: nil),
+            ActivePort(port: 8000, pid: 99994, projectName: "api", projectIdentifier: "/work/api", branch: "", startTime: nil)
+        ]
+        let store = PortStore(scanner: FakePortScanner(ports: ports, delay: 0))
+
+        store.refresh()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries.count == 3)
+
+        store.killProcesses(inProjectWithIdentifier: "/work/web")
+
+        #expect(store.entries.map(\.port) == [8000])
+
+        store.refresh()
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(store.entries.map(\.port) == [8000])
     }
 
     @Test @MainActor func diagnosticsSnapshot() {
