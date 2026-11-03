@@ -159,26 +159,41 @@ enum PackageIdentity {
     }
 
     static func name(forScript scriptPath: String) -> String? {
-        guard scriptPath.contains("/node_modules/") else { return nil }
-
         let resolved = URL(filePath: scriptPath).resolvingSymlinksInPath().path()
+        let insideNodeModules = resolved.contains("/node_modules/")
+
         guard let packageDirectory = nearestPackageDirectory(from: resolved),
               let manifest = manifest(at: packageDirectory)
         else { return nil }
 
         let relative = relativePath(of: resolved, in: packageDirectory)
         if let key = binKey(in: manifest, matching: relative) { return key }
-        return manifest.name
+
+        // 包里（`node_modules`）的脚本退一步用包名；
+        // 但**项目自己的**脚本只认 bin 命中：否则一个 Rust 二进制会捞到上层
+        // JS 项目的名字，比不显示更误导。
+        return insideNodeModules ? manifest.name : nil
     }
 
     // MARK: 细节
 
-    /// 从脚本往上找最近的 `package.json`，且必须仍在 `node_modules` 里。
+    /// 从脚本往上找最近的 `package.json`。
+    ///
+    /// `node_modules` 里的脚本一路走到包根；项目自己的脚本最多上溯 `maxAncestors` 层，
+    /// 免得一路走到家目录去捞一个无关的 `package.json`。
     private static func nearestPackageDirectory(from path: String) -> String? {
+        let insideNodeModules = path.contains("/node_modules/")
         var directory = (path as NSString).deletingLastPathComponent
+        var levels = 0
+
         while directory.count > 1 {
-            guard directory.contains("/node_modules/") || directory.hasSuffix("/node_modules") else {
-                return nil
+            if insideNodeModules {
+                guard directory.contains("/node_modules/") || directory.hasSuffix("/node_modules") else {
+                    return nil
+                }
+            } else {
+                levels += 1
+                guard levels <= maxAncestors else { return nil }
             }
             if FileManager.default.fileExists(atPath: directory + "/package.json") {
                 return directory
@@ -187,6 +202,9 @@ enum PackageIdentity {
         }
         return nil
     }
+
+    /// `node_modules` 外的上溯上限：`…/xyx-cli/dist/main.js` 只需要 2 层。
+    private static let maxAncestors = 5
 
     private static func relativePath(of file: String, in directory: String) -> String {
         guard file.hasPrefix(directory + "/") else { return (file as NSString).lastPathComponent }

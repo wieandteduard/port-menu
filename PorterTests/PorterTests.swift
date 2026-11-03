@@ -1029,18 +1029,36 @@ struct PackageIdentityTests {
         try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent())
     }
 
-    /// 脚本不在 `node_modules` 里 → 不读项目自己的 package.json（用户决定）。
-    @Test func ignoresProjectsOwnPackageJSON() throws {
+    /// 项目自己的脚本：**只认 bin 命中**，不拿包名顶替。
+    /// 否则一个 Rust 二进制（`target/debug/foo`）会捞到上层 JS 项目的名字。
+    @Test func projectsOwnScriptNeedsABinMatch() throws {
         let root = URL(filePath: NSTemporaryDirectory())
             .appending(path: "proj-fixture-\(UUID().uuidString)")
-        let scriptURL = root.appending(path: "server.mjs")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: root.appending(path: "dist"), withIntermediateDirectories: true
+        )
+        let scriptURL = root.appending(path: "dist/main.js")
         try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
-        let data = try JSONSerialization.data(withJSONObject: ["name": "my-app"])
+        let data = try JSONSerialization.data(withJSONObject: [
+            "name": "@heigame2020/xyx-cli",
+            "bin": ["xyx": "dist/main.js"],
+        ])
         try data.write(to: root.appending(path: "package.json"))
 
-        #expect(PackageIdentity.name(forScript: scriptURL.path()) == nil)
+        // bin 命中 → 用键名
+        #expect(PackageIdentity.name(forScript: scriptURL.path()) == "xyx")
         try? FileManager.default.removeItem(at: root)
+
+        // 没有 bin 字段 → 不拿包名顶替
+        let bare = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "proj-bare-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        let bareScript = bare.appending(path: "tool.mjs")
+        try "// script".write(to: bareScript, atomically: true, encoding: .utf8)
+        let bareData = try JSONSerialization.data(withJSONObject: ["name": "my-app"])
+        try bareData.write(to: bare.appending(path: "package.json"))
+        #expect(PackageIdentity.name(forScript: bareScript.path()) == nil)
+        try? FileManager.default.removeItem(at: bare)
     }
 
     /// 端到端：真实那条 xyx 命令行 → `xyx`，而不是 `main`。
