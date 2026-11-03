@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import AppKit
+import SwiftUI
 @testable import Port_Menu
 
 // MARK: - lsof Parser Tests
@@ -493,5 +495,72 @@ struct ScanDiagnosticsTests {
         #expect(summary.contains("42"))
         #expect(summary.contains("3 ports"))
         #expect(summary.contains("lsof"))
+    }
+}
+
+// MARK: - List Metrics Tests
+
+@MainActor
+struct PortListMetricsTests {
+
+    @Test func capsOnlyAboveTheRowLimit() {
+        #expect(PortListMetrics.visibleHeight(rowCount: PortListMetrics.maxRows + 1) == PortListMetrics.capHeight)
+        #expect(PortListMetrics.visibleHeight(rowCount: PortListMetrics.maxRows) == nil)
+        #expect(PortListMetrics.visibleHeight(rowCount: 3) == nil)
+    }
+
+    /// 封顶高度必须含列表底部的 padding，漏掉就会把最后一行切掉半截。
+    @Test func capIncludesBottomInset() {
+        let expected = CGFloat(PortListMetrics.maxRows) * PortListMetrics.rowHeight + PortListMetrics.bottomInset
+        #expect(PortListMetrics.capHeight == expected)
+    }
+
+    /// 行高是量出来的，不是一个写死的常数；这里只守住合理区间。
+    @Test func measuredRowHeightIsPlausible() {
+        #expect(PortListMetrics.rowHeight >= 40)
+        #expect(PortListMetrics.rowHeight <= 90)
+    }
+}
+
+// MARK: - Entry List Render Tests
+
+@MainActor
+struct PortEntryListRenderTests {
+
+    private func makeStore(entryCount: Int) -> PortStore {
+        let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
+        store.entries = (0..<entryCount).map { index in
+            ActivePort(
+                port: UInt16(3000 + index),
+                pid: Int32(index + 1),
+                projectName: "repo › apps/pkg\(index)",
+                branch: "main",
+                startTime: nil
+            )
+        }
+        return store
+    }
+
+    private func renderedHeight(_ store: PortStore) -> CGFloat {
+        let view = PortEntryListView()
+            .environment(store)
+            .frame(width: 340)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 2000)
+        hosting.layoutSubtreeIfNeeded()
+        return hosting.fittingSize.height
+    }
+
+    /// 真渲染一遍：12 条必须封顶在 capHeight，而不是长到内容那么高。
+    @Test func listIsCappedWhenEntriesExceedTheLimit() {
+        let height = renderedHeight(makeStore(entryCount: 12))
+        #expect(abs(height - PortListMetrics.capHeight) < 2, "rendered height was \(height)")
+    }
+
+    /// 3 条时不封顶，窗口按内容自适应。
+    @Test func shortListKeepsNaturalHeight() {
+        let height = renderedHeight(makeStore(entryCount: 3))
+        #expect(height < PortListMetrics.capHeight)
+        #expect(height > PortListMetrics.rowHeight * 2)
     }
 }

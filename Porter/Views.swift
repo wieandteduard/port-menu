@@ -236,12 +236,59 @@ struct HeaderButtonStyle: ButtonStyle {
 
 struct PortEntryListView: View {
     @Environment(PortStore.self) private var store
+    /// 只有一行能被 hover。用每行各自的 @State 时，滚走的行不会收到 exit 回调，
+    /// Kill/Open 就会一直留在屏幕上。
+    @State private var hoveredID: String?
+    @State private var scrollOffset: CGFloat = 0
+
+    private static let scrollSpace = "portEntryList"
 
     var body: some View {
-        ForEach(Array(store.entries.enumerated()), id: \.element.id) { index, entry in
-            PortRow(entry: entry, showTopDivider: index > 0)
+        ScrollView(.vertical) {
+            VStack(spacing: 0) {
+                ForEach(Array(store.entries.enumerated()), id: \.element.id) { index, entry in
+                    PortRow(
+                        entry: entry,
+                        showTopDivider: index > 0,
+                        hovered: hoveredID == entry.id,
+                        onHoverChange: { hovering in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                if hovering {
+                                    hoveredID = entry.id
+                                } else if hoveredID == entry.id {
+                                    hoveredID = nil
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+            .padding(.bottom, PortListMetrics.bottomInset)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: PortListScrollOffsetKey.self,
+                        value: proxy.frame(in: .named(Self.scrollSpace)).minY
+                    )
+                }
+            )
         }
-        .padding(.bottom, 6)
+        .coordinateSpace(name: Self.scrollSpace)
+        .frame(height: PortListMetrics.visibleHeight(rowCount: store.entries.count))
+        .onPreferenceChange(PortListScrollOffsetKey.self) { offset in
+            // 滚动时指针下的行会换人，exit 回调又不会补发：主动清掉 hover 状态。
+            guard abs(offset - scrollOffset) > 0.5 else { return }
+            scrollOffset = offset
+            if hoveredID != nil { hoveredID = nil }
+        }
+        .onChange(of: store.entries) { hoveredID = nil }
+    }
+}
+
+private struct PortListScrollOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
@@ -325,8 +372,11 @@ struct PortErrorStateView: View {
 struct PortRow: View {
     let entry: ActivePort
     let showTopDivider: Bool
+    /// 由 `PortEntryListView` 统一持有：同一时刻只有一行是 hovered。
+    let hovered: Bool
+    let onHoverChange: (Bool) -> Void
+
     @Environment(PortStore.self) private var store
-    @State private var isHovered = false
     @State private var slidOut = false
 
     var body: some View {
@@ -348,17 +398,19 @@ struct PortRow: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    Spacer()
+                    Spacer(minLength: 0)
 
-                    HStack(spacing: 2) {
-                        HoverButton("Kill", role: .destructive) { killWithAnimation() }
-                        HoverButton("Open") {
-                            NSWorkspace.shared.open(entry.url)
+                    // 按钮只在 hover 时进布局：非 hover 时名字吃满整行宽度。
+                    // 用 opacity 常驻会让每个名字永久少掉约 83pt，长包名直接截断。
+                    if hovered {
+                        HStack(spacing: 2) {
+                            HoverButton("Kill", role: .destructive) { killWithAnimation() }
+                            HoverButton("Open") {
+                                NSWorkspace.shared.open(entry.url)
+                            }
                         }
+                        .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .trailing)))
                     }
-                    .opacity(isHovered ? 1 : 0)
-                    .scaleEffect(isHovered ? 1 : 0.85, anchor: .trailing)
-                    .offset(x: isHovered ? 0 : 6)
                 }
 
                 HStack(spacing: 6) {
@@ -393,11 +445,7 @@ struct PortRow: View {
         .opacity(slidOut ? 0 : 1)
         .offset(x: slidOut ? 340 : 0)
         .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isHovered = hovering
-            }
-        }
+        .onHover { onHoverChange($0) }
         .contextMenu {
             Button("Copy URL") {
                 PortStore.copyToClipboard(entry.url.absoluteString)
