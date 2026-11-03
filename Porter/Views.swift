@@ -431,7 +431,19 @@ struct PortRow: View {
                                 .truncationMode(.middle)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                    } else if !entry.context.isEmpty {
+                    }
+
+                    if !entry.command.isEmpty {
+                        // 有 git 根：branch 之后补一条"跑的是什么"。
+                        if !entry.branch.isEmpty {
+                            Text("·").foregroundStyle(.tertiary)
+                        }
+                        Text(entry.command)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    if entry.branch.isEmpty && entry.command.isEmpty && !entry.context.isEmpty {
                         // 无 git 根：主行放的是"跑的是什么"，目录位置放这里。
                         HStack(spacing: 3) {
                             Image(systemName: "folder")

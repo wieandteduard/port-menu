@@ -270,13 +270,19 @@ struct LivePortScanner: PortScanning {
                 Log.scanner.debug("Using fallback label '\(projectName)' for PID \(info.pid) on port \(info.port)")
             }
 
+            let commandLabel = commands[info.pid]
+                .map { ProcessLabel.label(command: $0, processName: info.processName) } ?? ""
+
             return ActivePort(
                 port: info.port,
                 pid: info.pid,
                 projectName: projectName,
                 branch: rootPath.flatMap { branches[$0] } ?? "",
-                // 没有 git 根时，目录位置放副行，主行留给"跑的是什么"。
+                // 没有 git 根：目录位置放副行，主行留给"跑的是什么"。
                 context: gitRoot == nil ? ProcessLabel.directoryTail(cwd: cwd) : "",
+                // 有 git 根：主行是项目身份，命令身份作为补充信息放进副行；
+                // 没有 git 根时不重复（它已经在主行）。
+                command: gitRoot == nil ? "" : Self.subtitleCommand(commandLabel, projectName: projectName),
                 startTime: startTimes[info.pid]
             )
         }
@@ -318,6 +324,24 @@ struct LivePortScanner: PortScanning {
         }
 
         return processName
+    }
+
+    /// 副行要不要显示命令身份：主行已经说了同一个名字就不再重复。
+    static func subtitleCommand(_ label: String, projectName: String) -> String {
+        let normalized = label.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !normalized.isEmpty else { return "" }
+
+        let project = projectName.lowercased()
+        if normalized == project { return "" }
+
+        // `仓库 › 包路径` 里真正有辨识度的是后一段。
+        let tail = project
+            .split(separator: "›")
+            .last
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? project
+        if normalized == tail { return "" }
+
+        return label.trimmingCharacters(in: .whitespaces)
     }
 
     static func shouldKeepFallbackProcess(processName: String, cwd: String?) -> Bool {

@@ -8,8 +8,10 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
     let pid: Int32
     let projectName: String
     let branch: String
-    /// 无 git 根时副行显示的目录位置（有 branch 时不显示它）。
+    /// 无 git 根时副行显示的目录位置。
     let context: String
+    /// 有 git 根时副行追加的命令身份（无 git 根时它已经在主行，这里留空）。
+    let command: String
     let startTime: Date?
 
     var url: URL {
@@ -22,6 +24,7 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         projectName: String,
         branch: String,
         context: String = "",
+        command: String = "",
         startTime: Date?
     ) {
         self.id = "\(port)-\(pid)"
@@ -30,6 +33,7 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         self.projectName = projectName
         self.branch = branch
         self.context = context
+        self.command = command
         self.startTime = startTime
     }
 }

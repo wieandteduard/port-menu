@@ -948,3 +948,122 @@ struct ProcessLabelTests {
         #expect(name == "port-menu")
     }
 }
+
+// MARK: - Package Identity Tests
+
+struct PackageIdentityTests {
+
+    /// 造一个 `node_modules/<pkg>` 的假包，`bin` 用真实世界里最常见的写法。
+    private func makePackage(
+        name: String,
+        bin: [String: String]?,
+        scriptRelativePath: String = "lib/bin.js"
+    ) throws -> String {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "pkg-fixture-\(UUID().uuidString)/node_modules/\(name)")
+        let scriptURL = root.appending(path: scriptRelativePath)
+        try FileManager.default.createDirectory(
+            at: scriptURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        var manifest: [String: Any] = ["name": name]
+        if let bin { manifest["bin"] = bin }
+        let data = try JSONSerialization.data(withJSONObject: manifest)
+        try data.write(to: root.appending(path: "package.json"))
+        return scriptURL.path()
+    }
+
+    /// `bin` 键就是用户敲的命令，优先用它。
+    @Test func usesBinKeyWhenItMatchesTheScript() throws {
+        let script = try makePackage(name: "@deepseek-ai/dsh", bin: ["dsh": "lib/bin.js"])
+        #expect(PackageIdentity.name(forScript: script) == "dsh")
+        try? FileManager.default.removeItem(at: URL(filePath: script).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+    }
+
+    /// `bin` 值是 `./bin/tsc` 这种带 `./` 的相对路径，必须归一化后才比得上。
+    @Test func normalizesDotSlashInBinValues() throws {
+        let script = try makePackage(
+            name: "typescript",
+            bin: ["tsc": "./bin/tsc", "tsserver": "./bin/tsserver"],
+            scriptRelativePath: "bin/tsc"
+        )
+        #expect(PackageIdentity.name(forScript: script) == "tsc")
+    }
+
+    /// 多 bin 包、脚本匹配不上任何一个 bin 值 → 用包名（保留 scope），不猜键。
+    @Test func fallsBackToScopedPackageNameWhenNoBinMatches() throws {
+        let script = try makePackage(
+            name: "@heigame2020/xyx-cli",
+            bin: ["xyx": "./dist/main.js"],
+            scriptRelativePath: "lib/other.js"
+        )
+        #expect(PackageIdentity.name(forScript: script) == "@heigame2020/xyx-cli")
+    }
+
+    /// 字符串形式的 `bin` 没有键名 → 用包名。
+    @Test func stringBinFallsBackToPackageName() throws {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "pkg-stringbin-\(UUID().uuidString)/node_modules/single-bin")
+        let scriptURL = root.appending(path: "lib/bin.js")
+        try FileManager.default.createDirectory(
+            at: scriptURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
+        let data = try JSONSerialization.data(withJSONObject: ["name": "single-bin", "bin": "lib/bin.js"])
+        try data.write(to: root.appending(path: "package.json"))
+
+        #expect(PackageIdentity.name(forScript: scriptURL.path()) == "single-bin")
+        try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent())
+    }
+
+    /// 脚本不在 `node_modules` 里 → 不读项目自己的 package.json（用户决定）。
+    @Test func ignoresProjectsOwnPackageJSON() throws {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "proj-fixture-\(UUID().uuidString)")
+        let scriptURL = root.appending(path: "server.mjs")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
+        let data = try JSONSerialization.data(withJSONObject: ["name": "my-app"])
+        try data.write(to: root.appending(path: "package.json"))
+
+        #expect(PackageIdentity.name(forScript: scriptURL.path()) == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 端到端：真实那条 xyx 命令行 → `xyx`，而不是 `main`。
+    @Test func realXyxCommandResolvesThroughBinMetadata() throws {
+        let script = try makePackage(
+            name: "@heigame2020/xyx-cli",
+            bin: ["xyx": "./dist/main.js"],
+            scriptRelativePath: "dist/main.js"
+        )
+        let label = ProcessLabel.label(command: "node \(script)", processName: "node")
+        #expect(label == "xyx")
+        try? FileManager.default.removeItem(at: URL(filePath: script).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+    }
+}
+
+// MARK: - Subtitle Command Tests
+
+struct SubtitleCommandTests {
+
+    @Test func keepsDistinctCommand() {
+        #expect(LivePortScanner.subtitleCommand("vite", projectName: "port-menu") == "vite")
+    }
+
+    @Test func dropsDuplicateOfProjectName() {
+        #expect(LivePortScanner.subtitleCommand("port-menu", projectName: "port-menu") == "")
+        #expect(LivePortScanner.subtitleCommand("Port-Menu", projectName: "port-menu") == "")
+    }
+
+    @Test func dropsDuplicateOfPackageSegment() {
+        #expect(LivePortScanner.subtitleCommand(
+            "c3-disco-droids", projectName: "gc-2026-10 › c3-disco-droids"
+        ) == "")
+    }
+
+    @Test func emptyCommandStaysEmpty() {
+        #expect(LivePortScanner.subtitleCommand("", projectName: "port-menu") == "")
+    }
+}

@@ -92,7 +92,13 @@ enum ProcessLabel {
         return nil
     }
 
+    /// 脚本 → 名字。优先读包元数据（`bin` 键 → 包名），读不到才回退路径推导。
     private static func scriptName(fromPath path: String) -> String {
+        if let identity = PackageIdentity.name(forScript: path) { return identity }
+        return pathOnlyName(fromPath: path)
+    }
+
+    private static func pathOnlyName(fromPath path: String) -> String {
         // pnpm dlx / npx 的缓存路径里包名在 node_modules 之后：
         // …/node_modules/@deepseek-ai/dsh/lib/bin.js → dsh
         if let range = path.range(of: "node_modules/", options: .backwards) {
@@ -122,5 +128,124 @@ enum ProcessLabel {
             if name.hasSuffix(suffix) { return String(name.dropLast(suffix.count)) }
         }
         return name
+    }
+}
+
+// MARK: - 包元数据
+
+/// 从脚本路径回溯到它所属的 npm 包，给出这个名字。
+///
+/// 为什么不是纯路径推导：真实机器上 `@heigame2020/xyx-cli` 的入口是 `main.js`，
+/// 路径推导只能得到 `main`——毫无作用。包元数据能给出 `xyx`（`bin` 键，就是用户敲的命令）
+/// 或 `@heigame2020/xyx-cli`（包名）。
+///
+/// 只认 `node_modules` 里的包（用户决定）：脚本在自己项目里跑时，
+/// 项目身份已经由仓库名/包路径承担，这里回答的是"跑的是哪个第三方 CLI"。
+enum PackageIdentity {
+    struct Manifest {
+        let name: String?
+        /// `bin` 字段；字符串形式没有键名，只用来判断"这是个可执行包"。
+        let binaries: [String: String]
+    }
+
+    static func name(forScript scriptPath: String) -> String? {
+        guard scriptPath.contains("/node_modules/") else { return nil }
+
+        let resolved = URL(filePath: scriptPath).resolvingSymlinksInPath().path()
+        guard let packageDirectory = nearestPackageDirectory(from: resolved),
+              let manifest = manifest(at: packageDirectory)
+        else { return nil }
+
+        let relative = relativePath(of: resolved, in: packageDirectory)
+        if let key = binKey(in: manifest, matching: relative) { return key }
+        return manifest.name
+    }
+
+    // MARK: 细节
+
+    /// 从脚本往上找最近的 `package.json`，且必须仍在 `node_modules` 里。
+    private static func nearestPackageDirectory(from path: String) -> String? {
+        var directory = (path as NSString).deletingLastPathComponent
+        while directory.count > 1 {
+            guard directory.contains("/node_modules/") || directory.hasSuffix("/node_modules") else {
+                return nil
+            }
+            if FileManager.default.fileExists(atPath: directory + "/package.json") {
+                return directory
+            }
+            directory = (directory as NSString).deletingLastPathComponent
+        }
+        return nil
+    }
+
+    private static func relativePath(of file: String, in directory: String) -> String {
+        guard file.hasPrefix(directory + "/") else { return (file as NSString).lastPathComponent }
+        return String(file.dropFirst(directory.count + 1))
+    }
+
+    /// `bin` 值形如 `./bin/tsc`、`bin/tsc`、`./cli.js`，都要归一化后再比。
+    private static func binKey(in manifest: Manifest, matching relativePath: String) -> String? {
+        let target = normalizingBinaryPath(relativePath)
+        for (key, value) in manifest.binaries where normalizingBinaryPath(value) == target {
+            return key
+        }
+        return nil
+    }
+
+    private static func normalizingBinaryPath(_ value: String) -> String {
+        var path = value.trimmingCharacters(in: .whitespaces)
+        while path.hasPrefix("./") { path.removeFirst(2) }
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        return path
+    }
+
+    private static func manifest(at directory: String) -> Manifest? {
+        let path = directory + "/package.json"
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              let modified = attributes[.modificationDate] as? Date
+        else { return nil }
+
+        if let cached = cache.lookup(path: path, stamp: modified) { return cached }
+
+        let loaded = parseManifest(at: path)
+        cache.store(loaded, stamp: modified, path: path)
+        return loaded
+    }
+
+    private static func parseManifest(at path: String) -> Manifest? {
+        guard let data = try? Data(contentsOf: URL(filePath: path)),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        let name = object["name"] as? String
+        var binaries: [String: String] = [:]
+        if let dictionary = object["bin"] as? [String: String] {
+            binaries = dictionary
+        }
+        // 字符串形式的 bin 没有键名，保留为空表：落到包名。
+        guard name != nil || !binaries.isEmpty else { return nil }
+        return Manifest(name: name, binaries: binaries)
+    }
+
+    private static let cache = ManifestCache()
+
+    /// 按 `package.json` 的 mtime 失效：装了新版本立刻生效。
+    final class ManifestCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [String: (manifest: Manifest?, stamp: Date)] = [:]
+
+        func lookup(path: String, stamp: Date) -> Manifest?? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let entry = storage[path], entry.stamp == stamp else { return nil }
+            return .some(entry.manifest)
+        }
+
+        func store(_ manifest: Manifest?, stamp: Date, path: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            if storage.count > 256 { storage.removeAll() }
+            storage[path] = (manifest, stamp)
+        }
     }
 }
