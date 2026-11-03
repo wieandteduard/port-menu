@@ -274,7 +274,10 @@ struct PortEntryListView: View {
             )
         }
         .coordinateSpace(name: Self.scrollSpace)
-        .frame(height: PortListMetrics.visibleHeight(rowCount: store.entries.count))
+        .frame(height: PortListMetrics.visibleHeight(
+            rowCount: store.entries.count,
+            available: PortListMetrics.availableListHeight()
+        ))
         .onPreferenceChange(PortListScrollOffsetKey.self) { offset in
             // 滚动时指针下的行会换人，exit 回调又不会补发：主动清掉 hover 状态。
             guard abs(offset - scrollOffset) > 0.5 else { return }

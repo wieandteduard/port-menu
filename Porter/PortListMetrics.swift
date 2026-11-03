@@ -6,19 +6,37 @@ import SwiftUI
 /// 行高**实测**而不是写常数：字号、辅助功能设置、行内内容一变，常数就错，
 /// 而封顶算错的表现是"最后一行被切掉半截"，很难和"滚动"区分开。
 ///
-/// 上限高度里那个 `bottomInset` 是列表底部的 `.padding(.bottom, 6)`。
-/// 漏掉它，第 8 行的副行就会被裁掉——这一条是画图看出来的，不是推出来的。
+/// 上限不再是一个固定行数：日常有二十来个 dev server 时，固定 8 行等于让人一直滚。
+/// 现在按**屏幕可用高度**封顶，装得下就铺开，装不下才滚。
 @MainActor
 enum PortListMetrics {
-    static let maxRows = 8
+    /// 列表底部的 `.padding(.bottom, 6)`。漏掉它，最后一行会被裁掉半截。
     static let bottomInset: CGFloat = 6
 
-    static let rowHeight: CGFloat = measureRowHeight()
-    static let capHeight: CGFloat = CGFloat(maxRows) * rowHeight + bottomInset
+    /// 弹窗顶部（标题栏 + 分隔线）大约占掉的高度。
+    static let headerAllowance: CGFloat = 42
 
-    /// 不超过上限时返回 `nil`，让窗口按内容自适应；超过才封顶。
-    static func visibleHeight(rowCount: Int) -> CGFloat? {
-        rowCount > maxRows ? capHeight : nil
+    /// 弹窗底边与屏幕可用区域之间的留白。
+    static let screenMargin: CGFloat = 12
+
+    static let rowHeight: CGFloat = measureRowHeight()
+
+    /// 列表在给定屏幕上最多能占多高。
+    static func availableListHeight(screen: NSScreen? = NSScreen.main) -> CGFloat {
+        availableListHeight(screenHeight: screen?.visibleFrame.height ?? 800)
+    }
+
+    /// 同上，纯函数版本，方便测试；`screenHeight` 是屏幕**可用区域**的高度。
+    static func availableListHeight(screenHeight: CGFloat) -> CGFloat {
+        let usable = screenHeight - headerAllowance - screenMargin
+        // 保护下限：极小屏或异常数值下也别算出比两行还小的窗口。
+        return max(usable, rowHeight * 2 + bottomInset)
+    }
+
+    /// 装得下返回 `nil`（窗口按内容自适应），装不下返回封顶高度。
+    static func visibleHeight(rowCount: Int, available: CGFloat) -> CGFloat? {
+        let contentHeight = CGFloat(max(rowCount, 0)) * rowHeight + bottomInset
+        return contentHeight > available ? available : nil
     }
 
     private static func measureRowHeight() -> CGFloat {

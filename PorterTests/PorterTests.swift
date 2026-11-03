@@ -503,19 +503,39 @@ struct ScanDiagnosticsTests {
 @MainActor
 struct PortListMetricsTests {
 
-    @Test func capsOnlyAboveTheRowLimit() {
-        #expect(PortListMetrics.visibleHeight(rowCount: PortListMetrics.maxRows + 1) == PortListMetrics.capHeight)
-        #expect(PortListMetrics.visibleHeight(rowCount: PortListMetrics.maxRows) == nil)
-        #expect(PortListMetrics.visibleHeight(rowCount: 3) == nil)
+    @Test func shortListNeedsNoCap() {
+        #expect(PortListMetrics.visibleHeight(rowCount: 3, available: 800) == nil)
+        #expect(PortListMetrics.visibleHeight(rowCount: 0, available: 800) == nil)
     }
 
-    /// 封顶高度必须含列表底部的 padding，漏掉就会把最后一行切掉半截。
-    @Test func capIncludesBottomInset() {
-        let expected = CGFloat(PortListMetrics.maxRows) * PortListMetrics.rowHeight + PortListMetrics.bottomInset
-        #expect(PortListMetrics.capHeight == expected)
+    /// 内容比可用高度高时才封顶，且封顶高度就是可用高度。
+    @Test func longListIsCappedToTheAvailableHeight() {
+        let available = PortListMetrics.rowHeight * 6 + PortListMetrics.bottomInset
+        #expect(PortListMetrics.visibleHeight(rowCount: 9, available: available) == available)
+        #expect(PortListMetrics.visibleHeight(rowCount: 21, available: available) == available)
     }
 
-    /// 行高是量出来的，不是一个写死的常数；这里只守住合理区间。
+    /// 上限跟随屏幕：屏幕越高，能铺开的行数越多。
+    @Test func availableHeightFollowsTheScreen() {
+        let tall = PortListMetrics.availableListHeight(screenHeight: 1_000)
+        let short = PortListMetrics.availableListHeight(screenHeight: 600)
+        #expect(tall > short)
+        #expect(tall == 1_000 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin)
+    }
+
+    /// 极小屏也别算出比两行还小的窗口。
+    @Test func availableHeightKeepsATwoRowFloor() {
+        let floorHeight = PortListMetrics.rowHeight * 2 + PortListMetrics.bottomInset
+        #expect(PortListMetrics.availableListHeight(screenHeight: 40) == floorHeight)
+    }
+
+    /// 封顶高度是"可用高度"本身，而可用高度已经扣掉了顶部与留白——
+    /// 这一条把"漏掉 bottomInset 会切掉最后一行"的教训钉住：行数 × 行高之外还有底部 padding。
+    @Test func contentHeightIncludesBottomInset() {
+        let available = CGFloat(2) * PortListMetrics.rowHeight + PortListMetrics.bottomInset - 1
+        #expect(PortListMetrics.visibleHeight(rowCount: 2, available: available) == available)
+    }
+
     @Test func measuredRowHeightIsPlausible() {
         #expect(PortListMetrics.rowHeight >= 40)
         #expect(PortListMetrics.rowHeight <= 90)
@@ -541,27 +561,34 @@ struct PortEntryListRenderTests {
         return store
     }
 
-    private func renderedHeight(_ store: PortStore) -> CGFloat {
+    /// 真渲染一遍：条数超过屏幕可用高度时必须封顶，而不是长到内容那么高。
+    /// 条数取得足够多，避免依赖具体机器的屏幕高度。
+    @Test func listIsCappedWhenEntriesExceedTheScreen() {
+        let store = makeStore(entryCount: 60)
         let view = PortEntryListView()
             .environment(store)
             .frame(width: 340)
         let hosting = NSHostingView(rootView: view)
-        hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 2000)
+        hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 4000)
         hosting.layoutSubtreeIfNeeded()
-        return hosting.fittingSize.height
+
+        let height = hosting.fittingSize.height
+        let available = PortListMetrics.availableListHeight()
+        #expect(abs(height - available) < 2, "rendered \(height), available \(available)")
     }
 
-    /// 真渲染一遍：12 条必须封顶在 capHeight，而不是长到内容那么高。
-    @Test func listIsCappedWhenEntriesExceedTheLimit() {
-        let height = renderedHeight(makeStore(entryCount: 12))
-        #expect(abs(height - PortListMetrics.capHeight) < 2, "rendered height was \(height)")
-    }
+    /// 装得下时铺开：3 条就只占 3 行 + 底部 padding 的高度。
+    @Test func shortListRendersAtItsNaturalHeight() {
+        let store = makeStore(entryCount: 3)
+        let view = PortEntryListView()
+            .environment(store)
+            .frame(width: 340)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 4000)
+        hosting.layoutSubtreeIfNeeded()
 
-    /// 3 条时不封顶，窗口按内容自适应。
-    @Test func shortListKeepsNaturalHeight() {
-        let height = renderedHeight(makeStore(entryCount: 3))
-        #expect(height < PortListMetrics.capHeight)
-        #expect(height > PortListMetrics.rowHeight * 2)
+        let expected = 3 * PortListMetrics.rowHeight + PortListMetrics.bottomInset
+        #expect(abs(hosting.fittingSize.height - expected) < 2, "rendered \(hosting.fittingSize.height)")
     }
 }
 
