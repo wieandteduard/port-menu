@@ -258,31 +258,26 @@ struct LivePortScanner: PortScanning {
                 return nil
             }
 
-            let projectName = Self.displayName(
+            let commandLabel = commands[info.pid].map {
+                ProcessLabel.label(command: $0, processName: info.processName)
+            } ?? ""
+            let projectName = Self.rowIdentity(
                 processName: info.processName,
                 cwd: cwd,
                 gitRoot: gitRoot,
-                packagePath: cwd.flatMap { packagePaths[$0] },
-                command: commands[info.pid]
+                packagePath: cwd.flatMap { packagePaths[$0] }
             )
 
             if gitRoot == nil, Log.isVerbose {
                 Log.scanner.debug("Using fallback label '\(projectName)' for PID \(info.pid) on port \(info.port)")
             }
 
-            let commandLabel = commands[info.pid]
-                .map { ProcessLabel.label(command: $0, processName: info.processName) } ?? ""
-
             return ActivePort(
                 port: info.port,
                 pid: info.pid,
                 projectName: projectName,
                 branch: rootPath.flatMap { branches[$0] } ?? "",
-                // 没有 git 根：目录位置放副行，主行留给"跑的是什么"。
-                context: gitRoot == nil ? ProcessLabel.directoryTail(cwd: cwd) : "",
-                // 有 git 根：主行是项目身份，命令身份作为补充信息放进副行；
-                // 没有 git 根时不重复（它已经在主行）。
-                command: gitRoot == nil ? "" : Self.subtitleCommand(commandLabel, projectName: projectName),
+                command: Self.programLabel(commandLabel),
                 startTime: startTimes[info.pid]
             )
         }
@@ -327,22 +322,35 @@ struct LivePortScanner: PortScanning {
         return processName
     }
 
-    /// 副行要不要显示命令身份：主行已经说了同一个名字就不再重复。
-    static func subtitleCommand(_ label: String, projectName: String) -> String {
-        let normalized = label.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !normalized.isEmpty, !ProcessLabel.isGenericEntryName(normalized) else { return "" }
+    /// 副行里的程序名：通用入口名（`main`/`index`…）不携带身份，不显示。
+    static func programLabel(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !ProcessLabel.isGenericEntryName(trimmed) else { return "" }
+        return trimmed
+    }
 
-        let project = projectName.lowercased()
-        if normalized == project { return "" }
+    /// 主行的身份。两种行统一成同一套结构：
+    ///
+    /// - 第一行：位置身份——git 仓库（`仓库` 或 `仓库 › 包`），或非 git 时的 cwd 位置
+    /// - 第二行：分支（若有）· 程序名 · 端口
+    ///
+    /// 非 git 且连目录都没有（`/`、家目录）时，才退回程序名当主行。
+    static func rowIdentity(
+        processName: String,
+        cwd: String?,
+        gitRoot: URL?,
+        packagePath: String?
+    ) -> String {
+        if isDockerProcess(processName) { return "Docker" }
 
-        // `仓库 › 包路径` 里真正有辨识度的是后一段。
-        let tail = project
-            .split(separator: "›")
-            .last
-            .map { $0.trimmingCharacters(in: .whitespaces) } ?? project
-        if normalized == tail { return "" }
+        if gitRoot != nil {
+            return displayName(processName: processName, cwd: cwd, gitRoot: gitRoot, packagePath: packagePath)
+        }
 
-        return label.trimmingCharacters(in: .whitespaces)
+        let directory = ProcessLabel.directoryTail(cwd: cwd)
+        if !directory.isEmpty { return directory }
+
+        return displayName(processName: processName, cwd: cwd, gitRoot: nil, packagePath: nil)
     }
 
     static func shouldKeepFallbackProcess(processName: String, cwd: String?) -> Bool {

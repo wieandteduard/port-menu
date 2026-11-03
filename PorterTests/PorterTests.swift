@@ -1074,34 +1074,73 @@ struct PackageIdentityTests {
     }
 }
 
-// MARK: - Subtitle Command Tests
+// MARK: - Program Label Tests
 
-struct SubtitleCommandTests {
+struct ProgramLabelTests {
 
-    @Test func keepsDistinctCommand() {
-        #expect(LivePortScanner.subtitleCommand("vite", projectName: "port-menu") == "vite")
+    /// 副行照常显示程序名，即使它和主行的包名相同（用户选择不做去重）。
+    @Test func keepsProgramNameEvenWhenItMatchesThePackage() {
+        #expect(LivePortScanner.programLabel("ticket-search") == "ticket-search")
+        #expect(LivePortScanner.programLabel("vite") == "vite")
     }
 
-    @Test func dropsDuplicateOfProjectName() {
-        #expect(LivePortScanner.subtitleCommand("port-menu", projectName: "port-menu") == "")
-        #expect(LivePortScanner.subtitleCommand("Port-Menu", projectName: "port-menu") == "")
-    }
-
-    @Test func dropsDuplicateOfPackageSegment() {
-        #expect(LivePortScanner.subtitleCommand(
-            "c3-disco-droids", projectName: "gc-2026-10 › c3-disco-droids"
-        ) == "")
-    }
-
-    @Test func emptyCommandStaysEmpty() {
-        #expect(LivePortScanner.subtitleCommand("", projectName: "port-menu") == "")
-    }
-
-    /// `node dist/main.js` 推出的 `main` 不携带身份信息，副行不要它。
+    /// 通用入口名仍然不显示。
     @Test func dropsGenericEntryNames() {
-        #expect(LivePortScanner.subtitleCommand("main", projectName: "gc-2026-10 › threejs-tnt-voxel") == "")
-        #expect(LivePortScanner.subtitleCommand("index", projectName: "port-menu") == "")
-        #expect(LivePortScanner.subtitleCommand("main.js", projectName: "port-menu") == "main.js")
-        #expect(LivePortScanner.subtitleCommand("http.server", projectName: "port-menu") == "http.server")
+        #expect(LivePortScanner.programLabel("main") == "")
+        #expect(LivePortScanner.programLabel("index") == "")
+        #expect(LivePortScanner.programLabel("main.js") == "main.js")
+        #expect(LivePortScanner.programLabel("http.server") == "http.server")
+    }
+}
+
+// MARK: - Row Identity Tests
+
+struct RowIdentityTests {
+
+    private let repoRoot = URL(filePath: "/Users/me/work/gc-2026-10")
+
+    /// git 行：主行是仓库（或仓库 › 包），程序名留到副行。
+    @Test func gitRowUsesRepositoryIdentity() {
+        let name = LivePortScanner.rowIdentity(
+            processName: "node",
+            cwd: "/Users/me/work/gc-2026-10/packages/c3-disco-droids",
+            gitRoot: repoRoot,
+            packagePath: "c3-disco-droids"
+        )
+        #expect(name == "gc-2026-10 › c3-disco-droids")
+    }
+
+    /// 非 git 行：主行是 cwd 位置，而不是程序名——两种行共用一套结构。
+    @Test func nonGitRowUsesDirectoryAsIdentity() {
+        var home = FileManager.default.homeDirectoryForCurrentUser.path()
+        if home.count > 1, home.hasSuffix("/") { home.removeLast() }
+        let name = LivePortScanner.rowIdentity(
+            processName: "node",
+            cwd: home + "/Github",
+            gitRoot: nil,
+            packagePath: nil
+        )
+        #expect(name == "~/Github", "got \(name)")
+    }
+
+    /// 连目录都没有（`/`、家目录）时才退回程序名。
+    @Test func nonGitRowWithoutDirectoryFallsBackToProcessName() {
+        let name = LivePortScanner.rowIdentity(
+            processName: "node",
+            cwd: "/",
+            gitRoot: nil,
+            packagePath: nil
+        )
+        #expect(name == "node")
+    }
+
+    @Test func dockerStaysDocker() {
+        let name = LivePortScanner.rowIdentity(
+            processName: "com.docker.backend",
+            cwd: "/Users/me/Github",
+            gitRoot: nil,
+            packagePath: nil
+        )
+        #expect(name == "Docker")
     }
 }

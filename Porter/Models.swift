@@ -8,9 +8,7 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
     let pid: Int32
     let projectName: String
     let branch: String
-    /// 无 git 根时副行显示的目录位置。
-    let context: String
-    /// 有 git 根时副行追加的命令身份（无 git 根时它已经在主行，这里留空）。
+    /// 副行里的程序身份（分支之后、端口之前）。
     let command: String
     let startTime: Date?
 
@@ -23,7 +21,6 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         pid: Int32,
         projectName: String,
         branch: String,
-        context: String = "",
         command: String = "",
         startTime: Date?
     ) {
@@ -32,7 +29,6 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         self.pid = pid
         self.projectName = projectName
         self.branch = branch
-        self.context = context
         self.command = command
         self.startTime = startTime
     }
