@@ -7,13 +7,18 @@ private final class UpdaterDelegate: NSObject, SPUUpdaterDelegate {
     }
 }
 
-/// 本地开发分支一律关掉自动更新。
+/// 自动更新只在发布构建里启用。
 ///
-/// `UpdaterDelegate` 里的 feed 指向上游的 appcast.xml，开着自动更新会把上游
-/// 构建下载下来覆盖本地改动。关掉之后 `updaterController` 为 nil，UI 里也不再有
-/// "Check for Updates…" 入口，而不是留一个会推回上游版本的按钮。
+/// Debug 构建是开发者本地跑的：`UpdaterDelegate` 的 feed 指向本仓库的 appcast，
+/// 开着自动更新会把正式版本下载下来覆盖本地改动，所以 Debug 下不创建 updater，
+/// UI 里也不留一个"点了就会还原成正式版"的按钮。
+/// Release 构建（发布流程）行为不变。
 enum UpdaterPolicy {
+    #if DEBUG
     static let isEnabled = false
+    #else
+    static let isEnabled = true
+    #endif
 }
 
 @main
