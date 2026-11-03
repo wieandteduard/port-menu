@@ -211,6 +211,28 @@ struct LivePortScanner: PortScanning {
             }
         }
 
+        // 每个 cwd 落在哪个 workspace 包里；同一仓库里所有包共享父目录时省略那一段。
+        var packagePaths: [String: String] = [:]
+        var pathsByRoot: [String: [(cwd: String, path: String)]] = [:]
+        for (_, cwd) in cwds {
+            guard let root = gitRoots[cwd],
+                  let path = WorkspaceResolver.packagePath(
+                      cwd: cwd,
+                      repoRoot: root.path(),
+                      patterns: WorkspaceResolver.patterns(atRepoRoot: root)
+                  )
+            else { continue }
+            pathsByRoot[root.path(), default: []].append((cwd: cwd, path: path))
+        }
+        for (_, items) in pathsByRoot {
+            let prefix = WorkspaceResolver.elisionPrefix(for: items.map(\.path))
+            for item in items {
+                packagePaths[item.cwd] = prefix
+                    .flatMap { item.path.hasPrefix($0) ? String(item.path.dropFirst($0.count)) : nil }
+                    ?? item.path
+            }
+        }
+
         let activeCWDs = Set(cwds.values)
         let activeRootPaths = Set(gitRoots.values.map { $0.path() })
         Self.cache.prune(activeCWDs: activeCWDs, activeRootPaths: activeRootPaths)
@@ -230,7 +252,8 @@ struct LivePortScanner: PortScanning {
             let projectName = Self.displayName(
                 processName: info.processName,
                 cwd: cwd,
-                gitRoot: gitRoot
+                gitRoot: gitRoot,
+                packagePath: cwd.flatMap { packagePaths[$0] }
             )
 
             if gitRoot == nil, Log.isVerbose {
@@ -247,8 +270,17 @@ struct LivePortScanner: PortScanning {
         }
     }
 
-    static func displayName(processName: String, cwd: String?, gitRoot: URL?) -> String {
+    static func displayName(
+        processName: String,
+        cwd: String?,
+        gitRoot: URL?,
+        packagePath: String? = nil
+    ) -> String {
         if let gitRoot {
+            if let packagePath, !packagePath.isEmpty {
+                // monorepo 里的包：仓库名 › 包路径，避免整个仓库的每个包都长一样。
+                return "\(gitRoot.lastPathComponent) › \(packagePath)"
+            }
             return gitRoot.lastPathComponent
         }
 

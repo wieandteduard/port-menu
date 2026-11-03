@@ -564,3 +564,250 @@ struct PortEntryListRenderTests {
         #expect(height > PortListMetrics.rowHeight * 2)
     }
 }
+
+// MARK: - Workspace Glob Tests
+
+struct WorkspaceGlobTests {
+
+    @Test func singleStarMatchesExactlyOneSegment() {
+        #expect(WorkspaceResolver.matches(pattern: "packages/*", path: "packages/web"))
+        #expect(!WorkspaceResolver.matches(pattern: "packages/*", path: "packages/web/sub"))
+        #expect(!WorkspaceResolver.matches(pattern: "packages/*", path: "packages"))
+    }
+
+    @Test func doubleStarMatchesAnyDepth() {
+        #expect(WorkspaceResolver.matches(pattern: "packages/**", path: "packages/web"))
+        #expect(WorkspaceResolver.matches(pattern: "packages/**", path: "packages/group/web"))
+        #expect(!WorkspaceResolver.matches(pattern: "packages/**", path: "apps/web"))
+    }
+
+    @Test func literalSegmentsAreCaseInsensitive() {
+        #expect(WorkspaceResolver.matches(pattern: "packages/web", path: "Packages/Web"))
+    }
+
+    @Test func leadingDotSlashIsStripped() {
+        #expect(WorkspaceResolver.matches(pattern: "./service", path: "service"))
+    }
+}
+
+// MARK: - Workspace Heuristic Tests
+
+struct WorkspaceHeuristicTests {
+
+    /// 建一个临时仓库骨架：`dirs` 是要创建的目录，`manifests` 是相对文件路径。
+    private func makeRepo(dirs: [String], manifests: [String] = []) throws -> URL {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "workspace-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for dir in dirs {
+            try FileManager.default.createDirectory(
+                at: root.appending(path: dir), withIntermediateDirectories: true
+            )
+        }
+        for manifest in manifests {
+            let url = root.appending(path: manifest)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try "{}".write(to: url, atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    @Test func detectsPackageDirectoryWithManifest() throws {
+        let root = try makeRepo(dirs: ["packages/web"], manifests: ["packages/web/package.json"])
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/web").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == "packages/web")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func climbsToNearestAncestorWithManifest() throws {
+        let root = try makeRepo(dirs: ["packages/web/src/deep"], manifests: ["packages/web/package.json"])
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/web/src/deep").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == "packages/web")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func repoRootItselfIsNotAPackage() throws {
+        let root = try makeRepo(dirs: [], manifests: ["package.json"])
+        #expect(WorkspaceResolver.packagePath(cwd: root.path(), repoRoot: root.path(), patterns: nil) == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func excludedSegmentsAreRejected() throws {
+        let root = try makeRepo(
+            dirs: ["packages/web/node_modules/dep"],
+            manifests: ["packages/web/node_modules/dep/package.json"]
+        )
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/web/node_modules/dep").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func deeperThanTheCapIsRejected() throws {
+        let root = try makeRepo(
+            dirs: ["a/b/c/d/e"],
+            manifests: ["a/b/c/d/e/package.json"]
+        )
+        #expect(WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "a/b/c/d/e").path(), repoRoot: root.path(), patterns: nil
+        ) == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 清单可以把包直接声明在仓库根下（深度 1），不被 minDepth 拦。
+    @Test func declaredPackageAtRepoRootDepthIsAllowed() throws {
+        let root = try makeRepo(dirs: ["codex-cli"], manifests: ["codex-cli/package.json"])
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "codex-cli").path(),
+            repoRoot: root.path(),
+            patterns: ["codex-cli", "sdk/typescript"]
+        )
+        #expect(path == "codex-cli")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 声明的清单是否决权：没被 pattern 命中的目录不算包，哪怕它自己有 manifest。
+    @Test func declaredPatternsVetoTheHeuristic() throws {
+        let root = try makeRepo(
+            dirs: ["apps/web", "docs/tooling"],
+            manifests: ["apps/web/package.json", "docs/tooling/package.json"]
+        )
+        let web = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "apps/web").path(), repoRoot: root.path(), patterns: ["apps/*"]
+        )
+        let tooling = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "docs/tooling").path(), repoRoot: root.path(), patterns: ["apps/*"]
+        )
+        #expect(web == "apps/web")
+        #expect(tooling == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+}
+
+// MARK: - Workspace Elision Tests
+
+struct WorkspaceElisionTests {
+
+    @Test func elidesSharedParent() {
+        #expect(WorkspaceResolver.elisionPrefix(for: ["packages/a", "packages/b"]) == "packages/")
+    }
+
+    @Test func noElisionWhenParentsDiffer() {
+        #expect(WorkspaceResolver.elisionPrefix(for: ["packages/a", "apps/b"]) == nil)
+    }
+
+    @Test func noElisionWhenDepthsDiffer() {
+        #expect(WorkspaceResolver.elisionPrefix(for: ["packages/a", "toplevel"]) == nil)
+    }
+
+    @Test func emptyInputHasNoPrefix() {
+        #expect(WorkspaceResolver.elisionPrefix(for: []) == nil)
+    }
+}
+
+// MARK: - Workspace Manifest Parser Tests
+
+struct WorkspaceManifestParserTests {
+
+    @Test func pnpmWorkspaceList() {
+        let yaml = """
+        packages:
+          - "packages/*"
+          - 'apps/*'
+          - "!packages/legacy/**"
+        catalog:
+          react: ^19.0.0
+        """
+        #expect(WorkspaceResolver.pnpmPatterns(yaml) == ["packages/*", "apps/*", "!packages/legacy/**"])
+    }
+
+    @Test func npmWorkspacesArray() {
+        let json = #"{"name":"repo","workspaces":["packages/*","apps/*"]}"#
+        #expect(WorkspaceResolver.npmPatterns(json) == ["packages/*", "apps/*"])
+    }
+
+    @Test func npmWorkspacesObjectForm() {
+        let json = #"{"workspaces":{"packages":["packages/*"],"nohoist":["**/react"]}}"#
+        #expect(WorkspaceResolver.npmPatterns(json) == ["packages/*"])
+    }
+
+    @Test func npmWithoutWorkspacesIsNil() {
+        #expect(WorkspaceResolver.npmPatterns(#"{"name":"repo"}"#) == nil)
+    }
+
+    @Test func cargoMembersMultiline() {
+        let toml = """
+        [workspace]
+        members = [
+            "crates/core",
+            "crates/cli",
+        ]
+        exclude = ["crates/legacy"]
+        """
+        #expect(WorkspaceResolver.cargoMembers(toml) == ["crates/core", "crates/cli", "!crates/legacy"])
+    }
+
+    @Test func goWorkUseBlock() {
+        let work = """
+        go 1.22
+
+        use (
+        	./service
+        	../shared
+        )
+        """
+        #expect(WorkspaceResolver.goWorkUse(work) == ["./service", "../shared"])
+    }
+
+    @Test func goWorkUseSingleValue() {
+        #expect(WorkspaceResolver.goWorkUse("go 1.22\n\nuse ./only\n") == ["./only"])
+    }
+}
+
+// MARK: - Monorepo Display Name Tests
+
+struct MonorepoDisplayNameTests {
+
+    @Test func packageNameCombinesRepoAndPath() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/gc-2026-10/packages/c3-disco-droids",
+            gitRoot: URL(filePath: "/Users/me/work/gc-2026-10"),
+            packagePath: "c3-disco-droids"
+        )
+        #expect(name == "gc-2026-10 › c3-disco-droids")
+    }
+
+    @Test func singlePackageRepoStaysBare() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/showyedge",
+            gitRoot: URL(filePath: "/Users/me/work/showyedge"),
+            packagePath: nil
+        )
+        #expect(name == "showyedge")
+    }
+
+    @Test func emptyPackagePathFallsBackToRepoName() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/showyedge",
+            gitRoot: URL(filePath: "/Users/me/work/showyedge"),
+            packagePath: ""
+        )
+        #expect(name == "showyedge")
+    }
+}
