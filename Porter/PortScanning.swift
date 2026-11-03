@@ -311,7 +311,8 @@ struct LivePortScanner: PortScanning {
         // 目录位置交给副行的 context，不再让容器目录（`~/Github`）冒充项目名。
         if let command, !command.isEmpty {
             let label = ProcessLabel.label(command: command, processName: processName)
-            if !label.isEmpty, label != processName {
+            // 通用入口名（`main`、`index`…）没有辨识度，继续往下回退。
+            if !label.isEmpty, label != processName, !ProcessLabel.isGenericEntryName(label) {
                 return label
             }
         }
@@ -329,7 +330,7 @@ struct LivePortScanner: PortScanning {
     /// 副行要不要显示命令身份：主行已经说了同一个名字就不再重复。
     static func subtitleCommand(_ label: String, projectName: String) -> String {
         let normalized = label.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !normalized.isEmpty else { return "" }
+        guard !normalized.isEmpty, !ProcessLabel.isGenericEntryName(normalized) else { return "" }
 
         let project = projectName.lowercased()
         if normalized == project { return "" }

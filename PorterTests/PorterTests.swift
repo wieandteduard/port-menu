@@ -936,6 +936,18 @@ struct ProcessLabelTests {
         #expect(name == "dsh")
     }
 
+    /// 通用入口名（`main`）不当作身份：无 git 根时退回目录名。
+    @Test func genericEntryNameFallsBackToDirectory() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/Github",
+            gitRoot: nil,
+            packagePath: nil,
+            command: "node /Users/me/work/xyx-cli/dist/main.js"
+        )
+        #expect(name == "Github")
+    }
+
     /// 有 git 根时命令身份不参与命名，仓库名/包路径照旧。
     @Test func commandDoesNotOverrideGitProjectName() {
         let name = LivePortScanner.displayName(
@@ -1065,5 +1077,13 @@ struct SubtitleCommandTests {
 
     @Test func emptyCommandStaysEmpty() {
         #expect(LivePortScanner.subtitleCommand("", projectName: "port-menu") == "")
+    }
+
+    /// `node dist/main.js` 推出的 `main` 不携带身份信息，副行不要它。
+    @Test func dropsGenericEntryNames() {
+        #expect(LivePortScanner.subtitleCommand("main", projectName: "gc-2026-10 › threejs-tnt-voxel") == "")
+        #expect(LivePortScanner.subtitleCommand("index", projectName: "port-menu") == "")
+        #expect(LivePortScanner.subtitleCommand("main.js", projectName: "port-menu") == "main.js")
+        #expect(LivePortScanner.subtitleCommand("http.server", projectName: "port-menu") == "http.server")
     }
 }

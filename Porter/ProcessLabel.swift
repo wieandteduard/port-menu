@@ -38,6 +38,16 @@ enum ProcessLabel {
         return scriptLabel(from: Array(tokens.dropFirst())) ?? executableName
     }
 
+    /// 打包器/脚手架的通用入口名不携带身份信息：`node dist/main.js` 推出 `main`，
+    /// 和没说一样。这类名字不当作"身份"使用。
+    static let genericEntryNames: Set<String> = [
+        "main", "index", "bin", "dist", "start", "run", "src", "lib",
+    ]
+
+    static func isGenericEntryName(_ name: String) -> Bool {
+        genericEntryNames.contains(name.trimmingCharacters(in: .whitespaces).lowercased())
+    }
+
     /// 无 git 根时给副行用的目录位置；家目录下显示成 `~/…`。
     /// 返回空串表示"这里没什么好说的"（根目录、家目录本身、没有 cwd）。
     static func directoryTail(cwd: String?) -> String {
