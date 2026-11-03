@@ -431,6 +431,14 @@ struct PortRow: View {
                                 .truncationMode(.middle)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                    } else if !entry.context.isEmpty {
+                        // 无 git 根：主行放的是"跑的是什么"，目录位置放这里。
+                        HStack(spacing: 3) {
+                            Image(systemName: "folder")
+                            Text(entry.context)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
                     }
 
                     // 端口是这一行里最需要被扫读的信息：只把数字染成强调色，

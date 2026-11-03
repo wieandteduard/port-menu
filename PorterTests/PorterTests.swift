@@ -876,3 +876,75 @@ struct MonorepoDisplayNameTests {
         #expect(name == "showyedge")
     }
 }
+
+// MARK: - Process Label Tests
+
+struct ProcessLabelTests {
+
+    /// pnpm dlx 的缓存路径：名字藏在最后一个 node_modules 之后的作用域包里。
+    @Test func resolvesPackageNameFromPnpmDlxPath() {
+        let command = """
+        node /Users/me/Library/Caches/pnpm/dlx/fe07/mvyx/node_modules/.bin/../.pacquet/@deepseek-ai+dsh@0.2.1-rc.5_39cc/node_modules/@deepseek-ai/dsh/lib/bin.js web
+        """
+        #expect(ProcessLabel.label(command: command, processName: "node") == "dsh")
+    }
+
+    @Test func resolvesScriptNameFromPlainNode() {
+        #expect(ProcessLabel.label(command: "node server.mjs --port 3000", processName: "node") == "server")
+        #expect(ProcessLabel.label(command: "/opt/homebrew/bin/node /Users/me/app/index.js", processName: "node") == "index")
+    }
+
+    @Test func keepsNonInterpreterProgramName() {
+        #expect(ProcessLabel.label(command: "/Users/me/.local/bin/next dev", processName: "next") == "next")
+    }
+
+    /// 进程自己改了标题：COMMAND 列是 node，但 ps 的 command 是它自定的名字。
+    @Test func usesSelfAssignedProcessTitle() {
+        #expect(ProcessLabel.label(command: "Raycast Backend", processName: "node") == "Raycast Backend")
+    }
+
+    @Test func resolvesPythonModuleFlag() {
+        #expect(ProcessLabel.label(command: "python3 -m http.server 3300", processName: "Python") == "http.server")
+        #expect(ProcessLabel.label(command: "python3 app.py", processName: "Python") == "app")
+    }
+
+    @Test func fallsBackToProcessNameWithoutCommand() {
+        #expect(ProcessLabel.label(command: "", processName: "node") == "node")
+    }
+
+    @Test func directoryTailHidesRootAndHome() {
+        var home = FileManager.default.homeDirectoryForCurrentUser.path()
+        // 测试宿主进程的 HOME 带尾斜杠，先归一化再拼路径。
+        if home.count > 1, home.hasSuffix("/") { home.removeLast() }
+        #expect(ProcessLabel.directoryTail(cwd: "/") == "")
+        let tailOfHome = ProcessLabel.directoryTail(cwd: home)
+        #expect(tailOfHome == "", "home=\(home) tail=\(tailOfHome)")
+        #expect(ProcessLabel.directoryTail(cwd: nil) == "")
+        #expect(ProcessLabel.directoryTail(cwd: home + "/Github") == "~/Github")
+        #expect(ProcessLabel.directoryTail(cwd: "/tmp/scratch") == "/tmp/scratch")
+    }
+
+    /// 无 git 根时主行用命令身份，而不是容器目录名。
+    @Test func displayNamePrefersCommandOverContainerDirectory() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/Github",
+            gitRoot: nil,
+            packagePath: nil,
+            command: "node /Users/me/.cache/dlx/abc/node_modules/@deepseek-ai/dsh/lib/bin.js web"
+        )
+        #expect(name == "dsh")
+    }
+
+    /// 有 git 根时命令身份不参与命名，仓库名/包路径照旧。
+    @Test func commandDoesNotOverrideGitProjectName() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/port-menu",
+            gitRoot: URL(filePath: "/Users/me/work/port-menu"),
+            packagePath: nil,
+            command: "node /Users/me/work/port-menu/scripts/dev.js"
+        )
+        #expect(name == "port-menu")
+    }
+}

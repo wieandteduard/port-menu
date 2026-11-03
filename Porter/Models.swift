@@ -8,18 +8,28 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
     let pid: Int32
     let projectName: String
     let branch: String
+    /// 无 git 根时副行显示的目录位置（有 branch 时不显示它）。
+    let context: String
     let startTime: Date?
 
     var url: URL {
         URL(string: "http://localhost:\(port)")!
     }
 
-    init(port: UInt16, pid: Int32, projectName: String, branch: String, startTime: Date?) {
+    init(
+        port: UInt16,
+        pid: Int32,
+        projectName: String,
+        branch: String,
+        context: String = "",
+        startTime: Date?
+    ) {
         self.id = "\(port)-\(pid)"
         self.port = port
         self.pid = pid
         self.projectName = projectName
         self.branch = branch
+        self.context = context
         self.startTime = startTime
     }
 }

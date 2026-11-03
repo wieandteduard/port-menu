@@ -73,11 +73,14 @@ struct LivePortScanner: PortScanning {
 
         let pids = Set(parsed.map(\.pid))
         async let cwdResult = resolveCWDs(pids: pids)
-        async let startTimeResult = resolveStartTimes(pids: pids)
-        let (cwds, startTimes) = await (cwdResult, startTimeResult)
+        async let detailsResult = resolveProcessDetails(pids: pids)
+        let (cwds, details) = await (cwdResult, detailsResult)
+        let startTimes = details.mapValues(\.start).compactMapValues { $0 }
+        let commands = details.mapValues(\.command)
 
         return await resolveProjects(parsed: parsed, cwds: cwds,
-                                     startTimes: startTimes)
+                                     startTimes: startTimes,
+                                     commands: commands)
     }
 
     // MARK: - lsof Parsing (static for testability)
@@ -146,16 +149,22 @@ struct LivePortScanner: PortScanning {
 
     // MARK: - Start Time Resolution
 
-    private func resolveStartTimes(pids: Set<Int32>) async -> [Int32: Date] {
+    struct ProcessDetails: Sendable {
+        let start: Date?
+        let command: String
+    }
+
+    /// 一次 `ps` 同时取启动时间与整条命令行：无 git 根的进程要靠命令行判断"跑的是什么"。
+    private func resolveProcessDetails(pids: Set<Int32>) async -> [Int32: ProcessDetails] {
         guard !pids.isEmpty else { return [:] }
         let pidList = pids.map(String.init).joined(separator: ",")
         guard let output = try? await runShell(
-            "/bin/ps", args: ["-p", pidList, "-o", "pid=,lstart="],
+            "/bin/ps", args: ["-p", pidList, "-o", "pid=,lstart=,command="],
             timeout: 5,
             environment: ["LC_ALL": "C"]
         ) else { return [:] }
 
-        var result: [Int32: Date] = [:]
+        var result: [Int32: ProcessDetails] = [:]
         // ps lstart format: "Tue Mar  5 14:23:01 2026"
         let strategy = Date.ParseStrategy(
             format: "\(weekday: .abbreviated) \(month: .abbreviated) \(day: .twoDigits) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits) \(year: .defaultDigits)",
@@ -163,14 +172,13 @@ struct LivePortScanner: PortScanning {
             timeZone: .current
         )
         for line in output.split(separator: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
-            let normalized = parts[1]
-                .split(separator: " ", omittingEmptySubsequences: true)
-                .joined(separator: " ")
-            if let date = try? Date(normalized, strategy: strategy) {
-                result[pid] = date
-            }
+            let parts = line.split(separator: " ", maxSplits: 6, omittingEmptySubsequences: true)
+            // pid + 5 段日期 + 其余为命令行
+            guard parts.count >= 6, let pid = Int32(parts[0]) else { continue }
+            let normalized = parts[1...5].joined(separator: " ")
+            let date = try? Date(normalized, strategy: strategy)
+            let command = parts.count > 6 ? String(parts[6]) : ""
+            result[pid] = ProcessDetails(start: date, command: command)
         }
         return result
     }
@@ -180,7 +188,8 @@ struct LivePortScanner: PortScanning {
     private func resolveProjects(
         parsed: [ParsedPort],
         cwds: [Int32: String],
-        startTimes: [Int32: Date]
+        startTimes: [Int32: Date],
+        commands: [Int32: String] = [:]
     ) async -> [ActivePort] {
         var gitRoots: [String: URL] = [:]
         var branches: [String: String] = [:]
@@ -253,7 +262,8 @@ struct LivePortScanner: PortScanning {
                 processName: info.processName,
                 cwd: cwd,
                 gitRoot: gitRoot,
-                packagePath: cwd.flatMap { packagePaths[$0] }
+                packagePath: cwd.flatMap { packagePaths[$0] },
+                command: commands[info.pid]
             )
 
             if gitRoot == nil, Log.isVerbose {
@@ -265,6 +275,8 @@ struct LivePortScanner: PortScanning {
                 pid: info.pid,
                 projectName: projectName,
                 branch: rootPath.flatMap { branches[$0] } ?? "",
+                // 没有 git 根时，目录位置放副行，主行留给"跑的是什么"。
+                context: gitRoot == nil ? ProcessLabel.directoryTail(cwd: cwd) : "",
                 startTime: startTimes[info.pid]
             )
         }
@@ -274,7 +286,8 @@ struct LivePortScanner: PortScanning {
         processName: String,
         cwd: String?,
         gitRoot: URL?,
-        packagePath: String? = nil
+        packagePath: String? = nil,
+        command: String? = nil
     ) -> String {
         if let gitRoot {
             if let packagePath, !packagePath.isEmpty {
@@ -286,6 +299,15 @@ struct LivePortScanner: PortScanning {
 
         if isDockerProcess(processName) {
             return "Docker"
+        }
+
+        // 没有 git 根就没有可靠的项目身份：能拿到命令行时用它（`dsh`、`Raycast Backend`），
+        // 目录位置交给副行的 context，不再让容器目录（`~/Github`）冒充项目名。
+        if let command, !command.isEmpty {
+            let label = ProcessLabel.label(command: command, processName: processName)
+            if !label.isEmpty, label != processName {
+                return label
+            }
         }
 
         if let cwd {
