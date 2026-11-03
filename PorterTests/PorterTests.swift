@@ -503,9 +503,11 @@ struct ScanDiagnosticsTests {
 @MainActor
 struct PortListMetricsTests {
 
-    @Test func shortListNeedsNoCap() {
-        #expect(PortListMetrics.visibleHeight(rowCount: 3, available: 800) == nil)
-        #expect(PortListMetrics.visibleHeight(rowCount: 0, available: 800) == nil)
+    /// 装得下也要给**显式高度**（内容高度），不能返回 nil：
+    /// 无约束的 ScrollView 在 MenuBarExtra 窗口里会塌缩。
+    @Test func shortListGetsAnExplicitHeight() {
+        #expect(PortListMetrics.visibleHeight(rowCount: 3, available: 800) == 3 * PortListMetrics.rowHeight + PortListMetrics.bottomInset)
+        #expect(PortListMetrics.visibleHeight(rowCount: 0, available: 800) == PortListMetrics.bottomInset)
     }
 
     /// 内容比可用高度高时才封顶，且封顶高度就是可用高度。
@@ -1142,5 +1144,33 @@ struct RowIdentityTests {
             packagePath: nil
         )
         #expect(name == "Docker")
+    }
+}
+
+// MARK: - TEMP 排查（跑完即删）
+@MainActor
+struct DiagnoseCountTests {
+    @Test func printState() async {
+        let result = await LivePortScanner().scan()
+        if case .success(let ports, let diag) = result {
+            print("[diag] entries=\(ports.count) \(diag.summary)")
+            for p in ports.sorted(by: { $0.port < $1.port }) {
+                print("[diag] \(p.port) | \(p.projectName) | branch=\(p.branch) | cmd=\(p.command)")
+            }
+        }
+        print("[diag] screens:")
+        for s in NSScreen.screens {
+            print("[diag]   \(s.localizedName) visible=\(s.visibleFrame.height) main=\(s == NSScreen.main)")
+        }
+        print("[diag] available(screen)=\(PortListMetrics.availableListHeight())  rowHeight=\(PortListMetrics.rowHeight)  headerAllowance=\(PortListMetrics.headerAllowance)")
+
+        if case .success(let ports, _) = result {
+            let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
+            store.entries = ports
+            let hosting = NSHostingView(rootView: PortEntryListView().environment(store).frame(width: 340))
+            hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 3000)
+            hosting.layoutSubtreeIfNeeded()
+            print("[diag] rendered list height=\(hosting.fittingSize.height) for \(ports.count) entries")
+        }
     }
 }

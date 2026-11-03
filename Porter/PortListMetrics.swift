@@ -29,10 +29,15 @@ enum PortListMetrics {
         return max(usable, rowHeight * 2 + bottomInset)
     }
 
-    /// 装得下返回 `nil`（窗口按内容自适应），装不下返回封顶高度。
-    static func visibleHeight(rowCount: Int, available: CGFloat) -> CGFloat? {
+    /// 列表的显示高度：内容装得下就是内容高度，装不下是可用高度。
+    ///
+    /// **永远返回显式高度**，不能有"装得下就返回 nil 让窗口自然生长"的路径：
+    /// `MenuBarExtra` 窗口里无约束的 `ScrollView` 会塌缩——拟合查询报内容高度，
+    /// 真实窗口布局却按"窗口提议的尺寸"走，而窗口尺寸又取决于内容，循环依赖
+    /// 让窗口停在第一次布局的小尺寸上（真机塌成只剩标题栏，18 条数据一条不剩）。
+    static func visibleHeight(rowCount: Int, available: CGFloat) -> CGFloat {
         let contentHeight = CGFloat(max(rowCount, 0)) * rowHeight + bottomInset
-        return contentHeight > available ? available : nil
+        return min(contentHeight, available)
     }
 
     private static func measureRowHeight() -> CGFloat {
