@@ -40,7 +40,7 @@ enum WorkspaceResolver {
         if let patterns, !patterns.isEmpty {
             return deepestDeclaredMatch(segments: segments, patterns: patterns)
         }
-        return deepestDirectoryWithManifest(segments: segments, root: root)
+        return outermostDirectoryWithManifest(segments: segments, root: root)
     }
 
     private static func deepestDeclaredMatch(segments: [String], patterns: [String]) -> String? {
@@ -61,10 +61,18 @@ enum WorkspaceResolver {
         return nil
     }
 
-    private static func deepestDirectoryWithManifest(segments: [String], root: String) -> String? {
+    /// 兜底层取**最外层**含 manifest 的祖先，而不是最深的那个。
+    ///
+    /// 反例（真机抓到的）：`packages/threejs-rocket-fling/platform/vivo` 里的
+    /// `platform/vivo` 自带 `package.json`（每个平台的构建配置），取最深会把它
+    /// 当成一个包，路径就变成了 `packages/threejs-rocket-fling/platform/vivo`——
+    /// 既不是用户眼里的包，也让"省略公共父目录"失效（父目录不再统一）。
+    ///
+    /// 声明层不受这条影响：那里是用户明确写下的结构，允许嵌套，所以仍取最长匹配前缀。
+    private static func outermostDirectoryWithManifest(segments: [String], root: String) -> String? {
         let upper = min(segments.count, maxDepth)
         guard upper >= minDepth else { return nil }
-        for depth in stride(from: upper, through: minDepth, by: -1) {
+        for depth in stride(from: minDepth, through: upper, by: 1) {
             let candidate = segments[0..<depth].joined(separator: "/")
             let directory = root + "/" + candidate
             for manifest in manifestNames

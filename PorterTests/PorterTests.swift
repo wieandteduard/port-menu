@@ -625,6 +625,21 @@ struct WorkspaceHeuristicTests {
         try? FileManager.default.removeItem(at: root)
     }
 
+    /// 包里嵌套的构建配置目录（自带 package.json）不能抢走包的身份。
+    @Test func nestedBuildConfigurationDoesNotBecomeThePackage() throws {
+        let root = try makeRepo(
+            dirs: ["packages/rocket/platform/vivo"],
+            manifests: ["packages/rocket/package.json", "packages/rocket/platform/vivo/package.json"]
+        )
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/rocket/platform/vivo").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == "packages/rocket")
+        try? FileManager.default.removeItem(at: root)
+    }
+
     @Test func climbsToNearestAncestorWithManifest() throws {
         let root = try makeRepo(dirs: ["packages/web/src/deep"], manifests: ["packages/web/package.json"])
         let path = WorkspaceResolver.packagePath(
