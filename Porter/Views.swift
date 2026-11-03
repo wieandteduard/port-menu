@@ -424,9 +424,15 @@ struct PortRow: View {
                         }
                     }
 
-                    Text(":\(String(entry.port))")
-                        .fontDesign(.monospaced)
-                        .foregroundStyle(.tertiary)
+                    // 端口是这一行里最需要被扫读的信息：只把数字染成强调色，
+                    // 冒号留在 tertiary，避免整行变成两条彩色轴线。
+                    HStack(spacing: 0) {
+                        Text(":")
+                            .foregroundStyle(.tertiary)
+                        Text(String(entry.port))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .fontDesign(.monospaced)
 
                     Spacer()
 
