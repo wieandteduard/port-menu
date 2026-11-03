@@ -24,7 +24,7 @@ struct CheckForUpdatesView: View {
 struct PortListView: View {
     @Environment(PortStore.self) private var store
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
-    var updater: SPUUpdater
+    var updater: SPUUpdater?
 
     var body: some View {
         Group {
@@ -43,7 +43,7 @@ struct PortListView: View {
 
 struct PortMainContentView: View {
     @Environment(PortStore.self) private var store
-    var updater: SPUUpdater
+    var updater: SPUUpdater?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -70,7 +70,7 @@ struct PortHeaderView: View {
     @State private var menuHovered = false
     @State private var showMenu = false
     @State private var launchAtLoginError: String?
-    var updater: SPUUpdater
+    var updater: SPUUpdater?
 
     private var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
@@ -136,9 +136,11 @@ struct PortHeaderView: View {
                             .toggleStyle(.switch)
                             .controlSize(.mini)
 
-                        Divider()
+                        if let updater {
+                            Divider()
 
-                        CheckForUpdatesView(updater: updater)
+                            CheckForUpdatesView(updater: updater)
+                        }
                     }
                     .padding(12)
                 }
