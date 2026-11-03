@@ -60,6 +60,8 @@ struct PortMainContentView: View {
                 PortEntryListView()
             }
         }
+        // 挂在弹窗内容上，读到的是弹窗真正所在那块屏的可用高度。
+        .background(PopoverScreenReader().frame(width: 0, height: 0))
     }
 }
 
@@ -236,6 +238,8 @@ struct HeaderButtonStyle: ButtonStyle {
 
 struct PortEntryListView: View {
     @Environment(PortStore.self) private var store
+    /// 状态栏在哪块屏，就按那块屏的可用高度封顶（多显示器时 `NSScreen.main` 可能不对）。
+    @State private var screenTracker = PopoverScreenTracker.shared
     /// 只有一行能被 hover。用每行各自的 @State 时，滚走的行不会收到 exit 回调，
     /// Kill/Open 就会一直留在屏幕上。
     @State private var hoveredID: String?
@@ -276,7 +280,9 @@ struct PortEntryListView: View {
         .coordinateSpace(name: Self.scrollSpace)
         .frame(height: PortListMetrics.visibleHeight(
             rowCount: store.entries.count,
-            available: PortListMetrics.availableListHeight()
+            available: PortListMetrics.availableListHeight(
+                screenHeight: screenTracker.resolvedVisibleHeight
+            )
         ))
         .onPreferenceChange(PortListScrollOffsetKey.self) { offset in
             // 滚动时指针下的行会换人，exit 回调又不会补发：主动清掉 hover 状态。

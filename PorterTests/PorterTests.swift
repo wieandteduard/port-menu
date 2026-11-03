@@ -523,6 +523,18 @@ struct PortListMetricsTests {
         #expect(tall == 1_000 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin)
     }
 
+    /// 两块屏高度不同时，可用高度必须跟着屏走——这正是多显示器下 `NSScreen.main`
+    /// 会算错的那 356pt（本机内建 1084 vs 外接 1440）。
+    @Test func differentScreensGiveDifferentCaps() {
+        let builtIn = PortListMetrics.availableListHeight(screenHeight: 1084)
+        let external = PortListMetrics.availableListHeight(screenHeight: 1440)
+        #expect(builtIn == 1084 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin,
+                "builtIn was \(builtIn), rowHeight \(PortListMetrics.rowHeight)")
+        #expect(external == 1440 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin,
+                "external was \(external)")
+        #expect(external - builtIn == 356)
+    }
+
     /// 极小屏也别算出比两行还小的窗口。
     @Test func availableHeightKeepsATwoRowFloor() {
         let floorHeight = PortListMetrics.rowHeight * 2 + PortListMetrics.bottomInset
@@ -534,6 +546,17 @@ struct PortListMetricsTests {
     @Test func contentHeightIncludesBottomInset() {
         let available = CGFloat(2) * PortListMetrics.rowHeight + PortListMetrics.bottomInset - 1
         #expect(PortListMetrics.visibleHeight(rowCount: 2, available: available) == available)
+    }
+
+    /// tracker：读到值就记住，读到 nil 不要覆盖已有值（"这次没读到"≠"屏幕没高度"）。
+    @Test func screenTrackerKeepsLastKnownHeight() {
+        let tracker = PopoverScreenTracker()
+        tracker.update(visibleHeight: 1084)
+        #expect(tracker.visibleHeight == 1084)
+        tracker.update(visibleHeight: nil)
+        #expect(tracker.visibleHeight == 1084)
+        tracker.update(visibleHeight: 1440)
+        #expect(tracker.visibleHeight == 1440)
     }
 
     @Test func measuredRowHeightIsPlausible() {

@@ -21,14 +21,10 @@ enum PortListMetrics {
 
     static let rowHeight: CGFloat = measureRowHeight()
 
-    /// 列表在给定屏幕上最多能占多高。
-    static func availableListHeight(screen: NSScreen? = NSScreen.main) -> CGFloat {
-        availableListHeight(screenHeight: screen?.visibleFrame.height ?? 800)
-    }
-
-    /// 同上，纯函数版本，方便测试；`screenHeight` 是屏幕**可用区域**的高度。
-    static func availableListHeight(screenHeight: CGFloat) -> CGFloat {
-        let usable = screenHeight - headerAllowance - screenMargin
+    /// 列表在给定屏幕上最多能占多高；`nil` 时回退 `NSScreen.main`，再回退一个保守值。
+    static func availableListHeight(screenHeight: CGFloat? = nil) -> CGFloat {
+        let height = screenHeight ?? NSScreen.main?.visibleFrame.height ?? 800
+        let usable = height - headerAllowance - screenMargin
         // 保护下限：极小屏或异常数值下也别算出比两行还小的窗口。
         return max(usable, rowHeight * 2 + bottomInset)
     }
