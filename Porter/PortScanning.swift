@@ -276,6 +276,8 @@ struct LivePortScanner: PortScanning {
                 port: info.port,
                 pid: info.pid,
                 projectName: projectName,
+                repository: gitRoot?.lastPathComponent ?? "",
+                packagePath: gitRoot == nil ? "" : (cwd.flatMap { packagePaths[$0] } ?? ""),
                 branch: rootPath.flatMap { branches[$0] } ?? "",
                 command: Self.programLabel(commandLabel),
                 startTime: startTimes[info.pid]

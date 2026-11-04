@@ -402,10 +402,26 @@ struct PortRow: View {
                         .frame(width: 6, height: 6)
                         .offset(y: -1)
 
-                    Text(entry.projectName)
-                        .font(.system(.body, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    // 仓库名弱化、包名突出：一眼能认出是哪个包。宽度不够时先压缩仓库名，
+                    // 包路径尽量保持完整（这也顺带解决了 `.tail` 截断砍掉包名的问题）。
+                    if entry.packagePath.isEmpty {
+                        Text(entry.projectName)
+                            .font(.system(.body, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else {
+                        Text(entry.repository)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(0)
+                        Text("›")
+                            .foregroundStyle(.tertiary)
+                        Text(entry.packagePath)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(1)
+                    }
 
                     Spacer(minLength: 0)
 
@@ -421,6 +437,7 @@ struct PortRow: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .trailing)))
                     }
                 }
+                .font(.system(.body, weight: .medium))
 
                 HStack(spacing: 6) {
                     if !entry.branch.isEmpty {

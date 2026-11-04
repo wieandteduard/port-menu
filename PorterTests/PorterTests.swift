@@ -1174,3 +1174,45 @@ struct DiagnoseCountTests {
         }
     }
 }
+
+// MARK: - Row Parts Tests
+
+struct RowPartsTests {
+
+    /// 主行的两段必须分开携带：视图靠它们做"仓库弱、包强"的分级，
+    /// 而不是去解析 `" › "` 字符串。
+    @Test func monorepoRowCarriesBothParts() {
+        let row = ActivePort(
+            port: 3000,
+            pid: 1,
+            projectName: "gc-2026-10 › c3-disco-droids",
+            repository: "gc-2026-10",
+            packagePath: "c3-disco-droids",
+            branch: "main",
+            startTime: nil
+        )
+        #expect(row.repository == "gc-2026-10")
+        #expect(row.packagePath == "c3-disco-droids")
+    }
+
+    /// 单包仓库与非 git 行没有包段，主行按整串渲染（不出现多余的分隔符）。
+    @Test func singlePackageRowHasNoPackageSegment() {
+        let row = ActivePort(
+            port: 3000,
+            pid: 1,
+            projectName: "showyedge",
+            repository: "showyedge",
+            packagePath: "",
+            branch: "main",
+            startTime: nil
+        )
+        #expect(row.packagePath.isEmpty)
+
+        let nonGit = ActivePort(
+            port: 3080, pid: 2, projectName: "~/Github",
+            branch: "", startTime: nil
+        )
+        #expect(nonGit.repository.isEmpty)
+        #expect(nonGit.packagePath.isEmpty)
+    }
+}

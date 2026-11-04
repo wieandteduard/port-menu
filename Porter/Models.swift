@@ -6,7 +6,12 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
     let id: String
     let port: UInt16
     let pid: Int32
+    /// 完整显示串（`仓库` 或 `仓库 › 包路径`），供复制与无障碍使用。
     let projectName: String
+    /// `projectName` 的前半段：git 仓库名；非 git 行为空。
+    let repository: String
+    /// `projectName` 的后半段：包路径；单包仓库与非 git 行为空。
+    let packagePath: String
     let branch: String
     /// 副行里的程序身份（分支之后、端口之前）。
     let command: String
@@ -20,6 +25,8 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         port: UInt16,
         pid: Int32,
         projectName: String,
+        repository: String = "",
+        packagePath: String = "",
         branch: String,
         command: String = "",
         startTime: Date?
@@ -28,6 +35,8 @@ struct ActivePort: Identifiable, Equatable, Hashable, Sendable {
         self.port = port
         self.pid = pid
         self.projectName = projectName
+        self.repository = repository
+        self.packagePath = packagePath
         self.branch = branch
         self.command = command
         self.startTime = startTime
