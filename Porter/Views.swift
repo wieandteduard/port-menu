@@ -413,7 +413,10 @@ struct PortRow: View {
                         Text(entry.repository)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .truncationMode(.tail)
+                            // 中间截断：仓库名常常"尾巴"才是差异（gc-2026-09 / gc-2026-10）。
+                            .truncationMode(.middle)
+                            // 最小可见宽度：长包名不该把仓库名挤成一条缝。
+                            .frame(minWidth: 64, alignment: .leading)
                             .layoutPriority(0)
                         Text("›")
                             .foregroundStyle(.tertiary)
@@ -434,6 +437,8 @@ struct PortRow: View {
                                 NSWorkspace.shared.open(entry.url)
                             }
                         }
+                        // 高于名字的 layoutPriority：宁可截断名字，也不要压扁按钮。
+                        .layoutPriority(2)
                         .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .trailing)))
                     }
                 }
@@ -534,6 +539,9 @@ struct HoverButton: View {
         Button(action: action) {
             Text(label)
                 .font(.caption)
+                .lineLimit(1)
+                // 按钮尺寸由内容决定：空间紧张时该压缩的是名字，不是按钮。
+                .fixedSize()
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
         }
