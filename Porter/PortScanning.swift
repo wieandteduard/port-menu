@@ -73,11 +73,14 @@ struct LivePortScanner: PortScanning {
 
         let pids = Set(parsed.map(\.pid))
         async let cwdResult = resolveCWDs(pids: pids)
-        async let startTimeResult = resolveStartTimes(pids: pids)
-        let (cwds, startTimes) = await (cwdResult, startTimeResult)
+        async let detailsResult = resolveProcessDetails(pids: pids)
+        let (cwds, details) = await (cwdResult, detailsResult)
+        let startTimes = details.mapValues(\.start).compactMapValues { $0 }
+        let commands = details.mapValues(\.command)
 
         return await resolveProjects(parsed: parsed, cwds: cwds,
-                                     startTimes: startTimes)
+                                     startTimes: startTimes,
+                                     commands: commands)
     }
 
     // MARK: - lsof Parsing (static for testability)
@@ -146,16 +149,22 @@ struct LivePortScanner: PortScanning {
 
     // MARK: - Start Time Resolution
 
-    private func resolveStartTimes(pids: Set<Int32>) async -> [Int32: Date] {
+    struct ProcessDetails: Sendable {
+        let start: Date?
+        let command: String
+    }
+
+    /// 一次 `ps` 同时取启动时间与整条命令行：无 git 根的进程要靠命令行判断"跑的是什么"。
+    private func resolveProcessDetails(pids: Set<Int32>) async -> [Int32: ProcessDetails] {
         guard !pids.isEmpty else { return [:] }
         let pidList = pids.map(String.init).joined(separator: ",")
         guard let output = try? await runShell(
-            "/bin/ps", args: ["-p", pidList, "-o", "pid=,lstart="],
+            "/bin/ps", args: ["-p", pidList, "-o", "pid=,lstart=,command="],
             timeout: 5,
             environment: ["LC_ALL": "C"]
         ) else { return [:] }
 
-        var result: [Int32: Date] = [:]
+        var result: [Int32: ProcessDetails] = [:]
         // ps lstart format: "Tue Mar  5 14:23:01 2026"
         let strategy = Date.ParseStrategy(
             format: "\(weekday: .abbreviated) \(month: .abbreviated) \(day: .twoDigits) \(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits):\(second: .twoDigits) \(year: .defaultDigits)",
@@ -163,14 +172,13 @@ struct LivePortScanner: PortScanning {
             timeZone: .current
         )
         for line in output.split(separator: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
-            let normalized = parts[1]
-                .split(separator: " ", omittingEmptySubsequences: true)
-                .joined(separator: " ")
-            if let date = try? Date(normalized, strategy: strategy) {
-                result[pid] = date
-            }
+            let parts = line.split(separator: " ", maxSplits: 6, omittingEmptySubsequences: true)
+            // pid + 5 段日期 + 其余为命令行
+            guard parts.count >= 6, let pid = Int32(parts[0]) else { continue }
+            let normalized = parts[1...5].joined(separator: " ")
+            let date = try? Date(normalized, strategy: strategy)
+            let command = parts.count > 6 ? String(parts[6]) : ""
+            result[pid] = ProcessDetails(start: date, command: command)
         }
         return result
     }
@@ -180,7 +188,8 @@ struct LivePortScanner: PortScanning {
     private func resolveProjects(
         parsed: [ParsedPort],
         cwds: [Int32: String],
-        startTimes: [Int32: Date]
+        startTimes: [Int32: Date],
+        commands: [Int32: String] = [:]
     ) async -> [ActivePort] {
         var gitRoots: [String: URL] = [:]
         var branches: [String: String] = [:]
@@ -211,6 +220,28 @@ struct LivePortScanner: PortScanning {
             }
         }
 
+        // 每个 cwd 落在哪个 workspace 包里；同一仓库里所有包共享父目录时省略那一段。
+        var packagePaths: [String: String] = [:]
+        var pathsByRoot: [String: [(cwd: String, path: String)]] = [:]
+        for (_, cwd) in cwds {
+            guard let root = gitRoots[cwd],
+                  let path = WorkspaceResolver.packagePath(
+                      cwd: cwd,
+                      repoRoot: root.path(),
+                      patterns: WorkspaceResolver.patterns(atRepoRoot: root)
+                  )
+            else { continue }
+            pathsByRoot[root.path(), default: []].append((cwd: cwd, path: path))
+        }
+        for (_, items) in pathsByRoot {
+            let prefix = WorkspaceResolver.elisionPrefix(for: items.map(\.path))
+            for item in items {
+                packagePaths[item.cwd] = prefix
+                    .flatMap { item.path.hasPrefix($0) ? String(item.path.dropFirst($0.count)) : nil }
+                    ?? item.path
+            }
+        }
+
         let activeCWDs = Set(cwds.values)
         let activeRootPaths = Set(gitRoots.values.map { $0.path() })
         Self.cache.prune(activeCWDs: activeCWDs, activeRootPaths: activeRootPaths)
@@ -227,10 +258,14 @@ struct LivePortScanner: PortScanning {
                 return nil
             }
 
-            let projectName = Self.displayName(
+            let commandLabel = commands[info.pid].map {
+                ProcessLabel.label(command: $0, processName: info.processName)
+            } ?? ""
+            let projectName = Self.rowIdentity(
                 processName: info.processName,
                 cwd: cwd,
-                gitRoot: gitRoot
+                gitRoot: gitRoot,
+                packagePath: cwd.flatMap { packagePaths[$0] }
             )
 
             if gitRoot == nil, Log.isVerbose {
@@ -241,19 +276,42 @@ struct LivePortScanner: PortScanning {
                 port: info.port,
                 pid: info.pid,
                 projectName: projectName,
+                repository: gitRoot?.lastPathComponent ?? "",
+                packagePath: gitRoot == nil ? "" : (cwd.flatMap { packagePaths[$0] } ?? ""),
                 branch: rootPath.flatMap { branches[$0] } ?? "",
+                command: Self.programLabel(commandLabel),
                 startTime: startTimes[info.pid]
             )
         }
     }
 
-    static func displayName(processName: String, cwd: String?, gitRoot: URL?) -> String {
+    static func displayName(
+        processName: String,
+        cwd: String?,
+        gitRoot: URL?,
+        packagePath: String? = nil,
+        command: String? = nil
+    ) -> String {
         if let gitRoot {
+            if let packagePath, !packagePath.isEmpty {
+                // monorepo 里的包：仓库名 › 包路径，避免整个仓库的每个包都长一样。
+                return "\(gitRoot.lastPathComponent) › \(packagePath)"
+            }
             return gitRoot.lastPathComponent
         }
 
         if isDockerProcess(processName) {
             return "Docker"
+        }
+
+        // 没有 git 根就没有可靠的项目身份：能拿到命令行时用它（`dsh`、`Raycast Backend`），
+        // 目录位置交给副行的 context，不再让容器目录（`~/Github`）冒充项目名。
+        if let command, !command.isEmpty {
+            let label = ProcessLabel.label(command: command, processName: processName)
+            // 通用入口名（`main`、`index`…）没有辨识度，继续往下回退。
+            if !label.isEmpty, label != processName, !ProcessLabel.isGenericEntryName(label) {
+                return label
+            }
         }
 
         if let cwd {
@@ -264,6 +322,37 @@ struct LivePortScanner: PortScanning {
         }
 
         return processName
+    }
+
+    /// 副行里的程序名：通用入口名（`main`/`index`…）不携带身份，不显示。
+    static func programLabel(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !ProcessLabel.isGenericEntryName(trimmed) else { return "" }
+        return trimmed
+    }
+
+    /// 主行的身份。两种行统一成同一套结构：
+    ///
+    /// - 第一行：位置身份——git 仓库（`仓库` 或 `仓库 › 包`），或非 git 时的 cwd 位置
+    /// - 第二行：分支（若有）· 程序名 · 端口
+    ///
+    /// 非 git 且连目录都没有（`/`、家目录）时，才退回程序名当主行。
+    static func rowIdentity(
+        processName: String,
+        cwd: String?,
+        gitRoot: URL?,
+        packagePath: String?
+    ) -> String {
+        if isDockerProcess(processName) { return "Docker" }
+
+        if gitRoot != nil {
+            return displayName(processName: processName, cwd: cwd, gitRoot: gitRoot, packagePath: packagePath)
+        }
+
+        let directory = ProcessLabel.directoryTail(cwd: cwd)
+        if !directory.isEmpty { return directory }
+
+        return displayName(processName: processName, cwd: cwd, gitRoot: nil, packagePath: nil)
     }
 
     static func shouldKeepFallbackProcess(processName: String, cwd: String?) -> Bool {

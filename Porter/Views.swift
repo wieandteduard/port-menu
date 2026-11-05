@@ -24,7 +24,7 @@ struct CheckForUpdatesView: View {
 struct PortListView: View {
     @Environment(PortStore.self) private var store
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
-    var updater: SPUUpdater
+    var updater: SPUUpdater?
 
     var body: some View {
         Group {
@@ -43,7 +43,7 @@ struct PortListView: View {
 
 struct PortMainContentView: View {
     @Environment(PortStore.self) private var store
-    var updater: SPUUpdater
+    var updater: SPUUpdater?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -60,6 +60,8 @@ struct PortMainContentView: View {
                 PortEntryListView()
             }
         }
+        // 挂在弹窗内容上，读到的是弹窗真正所在那块屏的可用高度。
+        .background(PopoverScreenReader().frame(width: 0, height: 0))
     }
 }
 
@@ -70,7 +72,7 @@ struct PortHeaderView: View {
     @State private var menuHovered = false
     @State private var showMenu = false
     @State private var launchAtLoginError: String?
-    var updater: SPUUpdater
+    var updater: SPUUpdater?
 
     private var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "–"
@@ -136,9 +138,11 @@ struct PortHeaderView: View {
                             .toggleStyle(.switch)
                             .controlSize(.mini)
 
-                        Divider()
+                        if let updater {
+                            Divider()
 
-                        CheckForUpdatesView(updater: updater)
+                            CheckForUpdatesView(updater: updater)
+                        }
                     }
                     .padding(12)
                 }
@@ -234,12 +238,66 @@ struct HeaderButtonStyle: ButtonStyle {
 
 struct PortEntryListView: View {
     @Environment(PortStore.self) private var store
+    /// 状态栏在哪块屏，就按那块屏的可用高度封顶（多显示器时 `NSScreen.main` 可能不对）。
+    @State private var screenTracker = PopoverScreenTracker.shared
+    /// 只有一行能被 hover。用每行各自的 @State 时，滚走的行不会收到 exit 回调，
+    /// Kill/Open 就会一直留在屏幕上。
+    @State private var hoveredID: String?
+    @State private var scrollOffset: CGFloat = 0
+
+    private static let scrollSpace = "portEntryList"
 
     var body: some View {
-        ForEach(Array(store.entries.enumerated()), id: \.element.id) { index, entry in
-            PortRow(entry: entry, showTopDivider: index > 0)
+        ScrollView(.vertical) {
+            VStack(spacing: 0) {
+                ForEach(Array(store.entries.enumerated()), id: \.element.id) { index, entry in
+                    PortRow(
+                        entry: entry,
+                        showTopDivider: index > 0,
+                        hovered: hoveredID == entry.id,
+                        onHoverChange: { hovering in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                if hovering {
+                                    hoveredID = entry.id
+                                } else if hoveredID == entry.id {
+                                    hoveredID = nil
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+            .padding(.bottom, PortListMetrics.bottomInset)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: PortListScrollOffsetKey.self,
+                        value: proxy.frame(in: .named(Self.scrollSpace)).minY
+                    )
+                }
+            )
         }
-        .padding(.bottom, 6)
+        .coordinateSpace(name: Self.scrollSpace)
+        .frame(height: PortListMetrics.visibleHeight(
+            rowCount: store.entries.count,
+            available: PortListMetrics.availableListHeight(
+                screenHeight: screenTracker.resolvedVisibleHeight
+            )
+        ))
+        .onPreferenceChange(PortListScrollOffsetKey.self) { offset in
+            // 滚动时指针下的行会换人，exit 回调又不会补发：主动清掉 hover 状态。
+            guard abs(offset - scrollOffset) > 0.5 else { return }
+            scrollOffset = offset
+            if hoveredID != nil { hoveredID = nil }
+        }
+        .onChange(of: store.entries) { hoveredID = nil }
+    }
+}
+
+private struct PortListScrollOffsetKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
@@ -323,8 +381,11 @@ struct PortErrorStateView: View {
 struct PortRow: View {
     let entry: ActivePort
     let showTopDivider: Bool
+    /// 由 `PortEntryListView` 统一持有：同一时刻只有一行是 hovered。
+    let hovered: Bool
+    let onHoverChange: (Bool) -> Void
+
     @Environment(PortStore.self) private var store
-    @State private var isHovered = false
     @State private var slidOut = false
 
     var body: some View {
@@ -341,23 +402,47 @@ struct PortRow: View {
                         .frame(width: 6, height: 6)
                         .offset(y: -1)
 
-                    Text(entry.projectName)
-                        .font(.system(.body, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    Spacer()
-
-                    HStack(spacing: 2) {
-                        HoverButton("Kill", role: .destructive) { killWithAnimation() }
-                        HoverButton("Open") {
-                            NSWorkspace.shared.open(entry.url)
-                        }
+                    // 仓库名弱化、包名突出：一眼能认出是哪个包。宽度不够时先压缩仓库名，
+                    // 包路径尽量保持完整（这也顺带解决了 `.tail` 截断砍掉包名的问题）。
+                    if entry.packagePath.isEmpty {
+                        Text(entry.projectName)
+                            .font(.system(.body, weight: .medium))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else {
+                        Text(entry.repository)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            // 中间截断：仓库名常常"尾巴"才是差异（gc-2026-09 / gc-2026-10）。
+                            .truncationMode(.middle)
+                            // 最小可见宽度：长包名不该把仓库名挤成一条缝。
+                            .frame(minWidth: 64, alignment: .leading)
+                            .layoutPriority(0)
+                        Text("›")
+                            .foregroundStyle(.tertiary)
+                        Text(entry.packagePath)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .layoutPriority(1)
                     }
-                    .opacity(isHovered ? 1 : 0)
-                    .scaleEffect(isHovered ? 1 : 0.85, anchor: .trailing)
-                    .offset(x: isHovered ? 0 : 6)
+
+                    Spacer(minLength: 0)
+
+                    // 按钮只在 hover 时进布局：非 hover 时名字吃满整行宽度。
+                    // 用 opacity 常驻会让每个名字永久少掉约 83pt，长包名直接截断。
+                    if hovered {
+                        HStack(spacing: 2) {
+                            HoverButton("Kill", role: .destructive) { killWithAnimation() }
+                            HoverButton("Open") {
+                                NSWorkspace.shared.open(entry.url)
+                            }
+                        }
+                        // 高于名字的 layoutPriority：宁可截断名字，也不要压扁按钮。
+                        .layoutPriority(2)
+                        .transition(.opacity.combined(with: .scale(scale: 0.85, anchor: .trailing)))
+                    }
                 }
+                .font(.system(.body, weight: .medium))
 
                 HStack(spacing: 6) {
                     if !entry.branch.isEmpty {
@@ -370,9 +455,26 @@ struct PortRow: View {
                         }
                     }
 
-                    Text(":\(String(entry.port))")
-                        .fontDesign(.monospaced)
-                        .foregroundStyle(.tertiary)
+                    if !entry.command.isEmpty {
+                        // 有 git 根：branch 之后补一条"跑的是什么"。
+                        if !entry.branch.isEmpty {
+                            Text("·").foregroundStyle(.tertiary)
+                        }
+                        Text(entry.command)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+
+                    // 端口是这一行里最需要被扫读的信息：只把数字染成强调色，
+                    // 冒号留在 tertiary，避免整行变成两条彩色轴线。
+                    HStack(spacing: 0) {
+                        Text(":")
+                            .foregroundStyle(.tertiary)
+                        Text(String(entry.port))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .fontDesign(.monospaced)
 
                     Spacer()
 
@@ -391,11 +493,7 @@ struct PortRow: View {
         .opacity(slidOut ? 0 : 1)
         .offset(x: slidOut ? 340 : 0)
         .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
-                isHovered = hovering
-            }
-        }
+        .onHover { onHoverChange($0) }
         .contextMenu {
             Button("Copy URL") {
                 PortStore.copyToClipboard(entry.url.absoluteString)
@@ -441,6 +539,9 @@ struct HoverButton: View {
         Button(action: action) {
             Text(label)
                 .font(.caption)
+                .lineLimit(1)
+                // 按钮尺寸由内容决定：空间紧张时该压缩的是名字，不是按钮。
+                .fixedSize()
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
         }

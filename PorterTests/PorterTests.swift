@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import AppKit
+import SwiftUI
 @testable import Port_Menu
 
 // MARK: - lsof Parser Tests
@@ -493,5 +495,724 @@ struct ScanDiagnosticsTests {
         #expect(summary.contains("42"))
         #expect(summary.contains("3 ports"))
         #expect(summary.contains("lsof"))
+    }
+}
+
+// MARK: - List Metrics Tests
+
+@MainActor
+struct PortListMetricsTests {
+
+    /// 装得下也要给**显式高度**（内容高度），不能返回 nil：
+    /// 无约束的 ScrollView 在 MenuBarExtra 窗口里会塌缩。
+    @Test func shortListGetsAnExplicitHeight() {
+        #expect(PortListMetrics.visibleHeight(rowCount: 3, available: 800) == 3 * PortListMetrics.rowHeight + PortListMetrics.bottomInset)
+        #expect(PortListMetrics.visibleHeight(rowCount: 0, available: 800) == PortListMetrics.bottomInset)
+    }
+
+    /// 内容比可用高度高时才封顶，且封顶高度就是可用高度。
+    @Test func longListIsCappedToTheAvailableHeight() {
+        let available = PortListMetrics.rowHeight * 6 + PortListMetrics.bottomInset
+        #expect(PortListMetrics.visibleHeight(rowCount: 9, available: available) == available)
+        #expect(PortListMetrics.visibleHeight(rowCount: 21, available: available) == available)
+    }
+
+    /// 上限跟随屏幕：屏幕越高，能铺开的行数越多。
+    @Test func availableHeightFollowsTheScreen() {
+        let tall = PortListMetrics.availableListHeight(screenHeight: 1_000)
+        let short = PortListMetrics.availableListHeight(screenHeight: 600)
+        #expect(tall > short)
+        #expect(tall == 1_000 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin)
+    }
+
+    /// 两块屏高度不同时，可用高度必须跟着屏走——这正是多显示器下 `NSScreen.main`
+    /// 会算错的那 356pt（本机内建 1084 vs 外接 1440）。
+    @Test func differentScreensGiveDifferentCaps() {
+        let builtIn = PortListMetrics.availableListHeight(screenHeight: 1084)
+        let external = PortListMetrics.availableListHeight(screenHeight: 1440)
+        #expect(builtIn == 1084 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin,
+                "builtIn was \(builtIn), rowHeight \(PortListMetrics.rowHeight)")
+        #expect(external == 1440 - PortListMetrics.headerAllowance - PortListMetrics.screenMargin,
+                "external was \(external)")
+        #expect(external - builtIn == 356)
+    }
+
+    /// 极小屏也别算出比两行还小的窗口。
+    @Test func availableHeightKeepsATwoRowFloor() {
+        let floorHeight = PortListMetrics.rowHeight * 2 + PortListMetrics.bottomInset
+        #expect(PortListMetrics.availableListHeight(screenHeight: 40) == floorHeight)
+    }
+
+    /// 封顶高度是"可用高度"本身，而可用高度已经扣掉了顶部与留白——
+    /// 这一条把"漏掉 bottomInset 会切掉最后一行"的教训钉住：行数 × 行高之外还有底部 padding。
+    @Test func contentHeightIncludesBottomInset() {
+        let available = CGFloat(2) * PortListMetrics.rowHeight + PortListMetrics.bottomInset - 1
+        #expect(PortListMetrics.visibleHeight(rowCount: 2, available: available) == available)
+    }
+
+    /// tracker：读到值就记住，读到 nil 不要覆盖已有值（"这次没读到"≠"屏幕没高度"）。
+    @Test func screenTrackerKeepsLastKnownHeight() {
+        let tracker = PopoverScreenTracker()
+        tracker.update(visibleHeight: 1084)
+        #expect(tracker.visibleHeight == 1084)
+        tracker.update(visibleHeight: nil)
+        #expect(tracker.visibleHeight == 1084)
+        tracker.update(visibleHeight: 1440)
+        #expect(tracker.visibleHeight == 1440)
+    }
+
+    @Test func measuredRowHeightIsPlausible() {
+        #expect(PortListMetrics.rowHeight >= 40)
+        #expect(PortListMetrics.rowHeight <= 90)
+    }
+}
+
+// MARK: - Entry List Render Tests
+
+@MainActor
+struct PortEntryListRenderTests {
+
+    private func makeStore(entryCount: Int) -> PortStore {
+        let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
+        store.entries = (0..<entryCount).map { index in
+            ActivePort(
+                port: UInt16(3000 + index),
+                pid: Int32(index + 1),
+                projectName: "repo › apps/pkg\(index)",
+                branch: "main",
+                startTime: nil
+            )
+        }
+        return store
+    }
+
+    /// 真渲染一遍：条数超过屏幕可用高度时必须封顶，而不是长到内容那么高。
+    /// 条数取得足够多，避免依赖具体机器的屏幕高度。
+    @Test func listIsCappedWhenEntriesExceedTheScreen() {
+        let store = makeStore(entryCount: 60)
+        let view = PortEntryListView()
+            .environment(store)
+            .frame(width: 340)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 4000)
+        hosting.layoutSubtreeIfNeeded()
+
+        let height = hosting.fittingSize.height
+        let available = PortListMetrics.availableListHeight()
+        #expect(abs(height - available) < 2, "rendered \(height), available \(available)")
+    }
+
+    /// 装得下时铺开：3 条就只占 3 行 + 底部 padding 的高度。
+    @Test func shortListRendersAtItsNaturalHeight() {
+        let store = makeStore(entryCount: 3)
+        let view = PortEntryListView()
+            .environment(store)
+            .frame(width: 340)
+        let hosting = NSHostingView(rootView: view)
+        hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 4000)
+        hosting.layoutSubtreeIfNeeded()
+
+        let expected = 3 * PortListMetrics.rowHeight + PortListMetrics.bottomInset
+        #expect(abs(hosting.fittingSize.height - expected) < 2, "rendered \(hosting.fittingSize.height)")
+    }
+}
+
+// MARK: - Workspace Glob Tests
+
+struct WorkspaceGlobTests {
+
+    @Test func singleStarMatchesExactlyOneSegment() {
+        #expect(WorkspaceResolver.matches(pattern: "packages/*", path: "packages/web"))
+        #expect(!WorkspaceResolver.matches(pattern: "packages/*", path: "packages/web/sub"))
+        #expect(!WorkspaceResolver.matches(pattern: "packages/*", path: "packages"))
+    }
+
+    @Test func doubleStarMatchesAnyDepth() {
+        #expect(WorkspaceResolver.matches(pattern: "packages/**", path: "packages/web"))
+        #expect(WorkspaceResolver.matches(pattern: "packages/**", path: "packages/group/web"))
+        #expect(!WorkspaceResolver.matches(pattern: "packages/**", path: "apps/web"))
+    }
+
+    @Test func literalSegmentsAreCaseInsensitive() {
+        #expect(WorkspaceResolver.matches(pattern: "packages/web", path: "Packages/Web"))
+    }
+
+    @Test func leadingDotSlashIsStripped() {
+        #expect(WorkspaceResolver.matches(pattern: "./service", path: "service"))
+    }
+}
+
+// MARK: - Workspace Heuristic Tests
+
+struct WorkspaceHeuristicTests {
+
+    /// 建一个临时仓库骨架：`dirs` 是要创建的目录，`manifests` 是相对文件路径。
+    private func makeRepo(dirs: [String], manifests: [String] = []) throws -> URL {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "workspace-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for dir in dirs {
+            try FileManager.default.createDirectory(
+                at: root.appending(path: dir), withIntermediateDirectories: true
+            )
+        }
+        for manifest in manifests {
+            let url = root.appending(path: manifest)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+            )
+            try "{}".write(to: url, atomically: true, encoding: .utf8)
+        }
+        return root
+    }
+
+    @Test func detectsPackageDirectoryWithManifest() throws {
+        let root = try makeRepo(dirs: ["packages/web"], manifests: ["packages/web/package.json"])
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/web").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == "packages/web")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 包里嵌套的构建配置目录（自带 package.json）不能抢走包的身份。
+    @Test func nestedBuildConfigurationDoesNotBecomeThePackage() throws {
+        let root = try makeRepo(
+            dirs: ["packages/rocket/platform/vivo"],
+            manifests: ["packages/rocket/package.json", "packages/rocket/platform/vivo/package.json"]
+        )
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/rocket/platform/vivo").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == "packages/rocket")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func climbsToNearestAncestorWithManifest() throws {
+        let root = try makeRepo(dirs: ["packages/web/src/deep"], manifests: ["packages/web/package.json"])
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/web/src/deep").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == "packages/web")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func repoRootItselfIsNotAPackage() throws {
+        let root = try makeRepo(dirs: [], manifests: ["package.json"])
+        #expect(WorkspaceResolver.packagePath(cwd: root.path(), repoRoot: root.path(), patterns: nil) == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func excludedSegmentsAreRejected() throws {
+        let root = try makeRepo(
+            dirs: ["packages/web/node_modules/dep"],
+            manifests: ["packages/web/node_modules/dep/package.json"]
+        )
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "packages/web/node_modules/dep").path(),
+            repoRoot: root.path(),
+            patterns: nil
+        )
+        #expect(path == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @Test func deeperThanTheCapIsRejected() throws {
+        let root = try makeRepo(
+            dirs: ["a/b/c/d/e"],
+            manifests: ["a/b/c/d/e/package.json"]
+        )
+        #expect(WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "a/b/c/d/e").path(), repoRoot: root.path(), patterns: nil
+        ) == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 清单可以把包直接声明在仓库根下（深度 1），不被 minDepth 拦。
+    @Test func declaredPackageAtRepoRootDepthIsAllowed() throws {
+        let root = try makeRepo(dirs: ["codex-cli"], manifests: ["codex-cli/package.json"])
+        let path = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "codex-cli").path(),
+            repoRoot: root.path(),
+            patterns: ["codex-cli", "sdk/typescript"]
+        )
+        #expect(path == "codex-cli")
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    /// 声明的清单是否决权：没被 pattern 命中的目录不算包，哪怕它自己有 manifest。
+    @Test func declaredPatternsVetoTheHeuristic() throws {
+        let root = try makeRepo(
+            dirs: ["apps/web", "docs/tooling"],
+            manifests: ["apps/web/package.json", "docs/tooling/package.json"]
+        )
+        let web = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "apps/web").path(), repoRoot: root.path(), patterns: ["apps/*"]
+        )
+        let tooling = WorkspaceResolver.packagePath(
+            cwd: root.appending(path: "docs/tooling").path(), repoRoot: root.path(), patterns: ["apps/*"]
+        )
+        #expect(web == "apps/web")
+        #expect(tooling == nil)
+        try? FileManager.default.removeItem(at: root)
+    }
+}
+
+// MARK: - Workspace Elision Tests
+
+struct WorkspaceElisionTests {
+
+    @Test func elidesSharedParent() {
+        #expect(WorkspaceResolver.elisionPrefix(for: ["packages/a", "packages/b"]) == "packages/")
+    }
+
+    @Test func noElisionWhenParentsDiffer() {
+        #expect(WorkspaceResolver.elisionPrefix(for: ["packages/a", "apps/b"]) == nil)
+    }
+
+    @Test func noElisionWhenDepthsDiffer() {
+        #expect(WorkspaceResolver.elisionPrefix(for: ["packages/a", "toplevel"]) == nil)
+    }
+
+    @Test func emptyInputHasNoPrefix() {
+        #expect(WorkspaceResolver.elisionPrefix(for: []) == nil)
+    }
+}
+
+// MARK: - Workspace Manifest Parser Tests
+
+struct WorkspaceManifestParserTests {
+
+    @Test func pnpmWorkspaceList() {
+        let yaml = """
+        packages:
+          - "packages/*"
+          - 'apps/*'
+          - "!packages/legacy/**"
+        catalog:
+          react: ^19.0.0
+        """
+        #expect(WorkspaceResolver.pnpmPatterns(yaml) == ["packages/*", "apps/*", "!packages/legacy/**"])
+    }
+
+    @Test func npmWorkspacesArray() {
+        let json = #"{"name":"repo","workspaces":["packages/*","apps/*"]}"#
+        #expect(WorkspaceResolver.npmPatterns(json) == ["packages/*", "apps/*"])
+    }
+
+    @Test func npmWorkspacesObjectForm() {
+        let json = #"{"workspaces":{"packages":["packages/*"],"nohoist":["**/react"]}}"#
+        #expect(WorkspaceResolver.npmPatterns(json) == ["packages/*"])
+    }
+
+    @Test func npmWithoutWorkspacesIsNil() {
+        #expect(WorkspaceResolver.npmPatterns(#"{"name":"repo"}"#) == nil)
+    }
+
+    @Test func cargoMembersMultiline() {
+        let toml = """
+        [workspace]
+        members = [
+            "crates/core",
+            "crates/cli",
+        ]
+        exclude = ["crates/legacy"]
+        """
+        #expect(WorkspaceResolver.cargoMembers(toml) == ["crates/core", "crates/cli", "!crates/legacy"])
+    }
+
+    @Test func goWorkUseBlock() {
+        let work = """
+        go 1.22
+
+        use (
+        	./service
+        	../shared
+        )
+        """
+        #expect(WorkspaceResolver.goWorkUse(work) == ["./service", "../shared"])
+    }
+
+    @Test func goWorkUseSingleValue() {
+        #expect(WorkspaceResolver.goWorkUse("go 1.22\n\nuse ./only\n") == ["./only"])
+    }
+}
+
+// MARK: - Monorepo Display Name Tests
+
+struct MonorepoDisplayNameTests {
+
+    @Test func packageNameCombinesRepoAndPath() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/gc-2026-10/packages/c3-disco-droids",
+            gitRoot: URL(filePath: "/Users/me/work/gc-2026-10"),
+            packagePath: "c3-disco-droids"
+        )
+        #expect(name == "gc-2026-10 › c3-disco-droids")
+    }
+
+    @Test func singlePackageRepoStaysBare() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/showyedge",
+            gitRoot: URL(filePath: "/Users/me/work/showyedge"),
+            packagePath: nil
+        )
+        #expect(name == "showyedge")
+    }
+
+    @Test func emptyPackagePathFallsBackToRepoName() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/showyedge",
+            gitRoot: URL(filePath: "/Users/me/work/showyedge"),
+            packagePath: ""
+        )
+        #expect(name == "showyedge")
+    }
+}
+
+// MARK: - Process Label Tests
+
+struct ProcessLabelTests {
+
+    /// pnpm dlx 的缓存路径：名字藏在最后一个 node_modules 之后的作用域包里。
+    @Test func resolvesPackageNameFromPnpmDlxPath() {
+        let command = """
+        node /Users/me/Library/Caches/pnpm/dlx/fe07/mvyx/node_modules/.bin/../.pacquet/@deepseek-ai+dsh@0.2.1-rc.5_39cc/node_modules/@deepseek-ai/dsh/lib/bin.js web
+        """
+        #expect(ProcessLabel.label(command: command, processName: "node") == "dsh")
+    }
+
+    @Test func resolvesScriptNameFromPlainNode() {
+        #expect(ProcessLabel.label(command: "node server.mjs --port 3000", processName: "node") == "server")
+        #expect(ProcessLabel.label(command: "/opt/homebrew/bin/node /Users/me/app/index.js", processName: "node") == "index")
+    }
+
+    @Test func keepsNonInterpreterProgramName() {
+        #expect(ProcessLabel.label(command: "/Users/me/.local/bin/next dev", processName: "next") == "next")
+    }
+
+    /// 进程自己改了标题：COMMAND 列是 node，但 ps 的 command 是它自定的名字。
+    @Test func usesSelfAssignedProcessTitle() {
+        #expect(ProcessLabel.label(command: "Raycast Backend", processName: "node") == "Raycast Backend")
+    }
+
+    @Test func resolvesPythonModuleFlag() {
+        #expect(ProcessLabel.label(command: "python3 -m http.server 3300", processName: "Python") == "http.server")
+        #expect(ProcessLabel.label(command: "python3 app.py", processName: "Python") == "app")
+    }
+
+    @Test func fallsBackToProcessNameWithoutCommand() {
+        #expect(ProcessLabel.label(command: "", processName: "node") == "node")
+    }
+
+    @Test func directoryTailHidesRootAndHome() {
+        var home = FileManager.default.homeDirectoryForCurrentUser.path()
+        // 测试宿主进程的 HOME 带尾斜杠，先归一化再拼路径。
+        if home.count > 1, home.hasSuffix("/") { home.removeLast() }
+        #expect(ProcessLabel.directoryTail(cwd: "/") == "")
+        let tailOfHome = ProcessLabel.directoryTail(cwd: home)
+        #expect(tailOfHome == "", "home=\(home) tail=\(tailOfHome)")
+        #expect(ProcessLabel.directoryTail(cwd: nil) == "")
+        #expect(ProcessLabel.directoryTail(cwd: home + "/Github") == "~/Github")
+        #expect(ProcessLabel.directoryTail(cwd: "/tmp/scratch") == "/tmp/scratch")
+    }
+
+    /// 无 git 根时主行用命令身份，而不是容器目录名。
+    @Test func displayNamePrefersCommandOverContainerDirectory() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/Github",
+            gitRoot: nil,
+            packagePath: nil,
+            command: "node /Users/me/.cache/dlx/abc/node_modules/@deepseek-ai/dsh/lib/bin.js web"
+        )
+        #expect(name == "dsh")
+    }
+
+    /// 通用入口名（`main`）不当作身份：无 git 根时退回目录名。
+    @Test func genericEntryNameFallsBackToDirectory() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/Github",
+            gitRoot: nil,
+            packagePath: nil,
+            command: "node /Users/me/work/xyx-cli/dist/main.js"
+        )
+        #expect(name == "Github")
+    }
+
+    /// 有 git 根时命令身份不参与命名，仓库名/包路径照旧。
+    @Test func commandDoesNotOverrideGitProjectName() {
+        let name = LivePortScanner.displayName(
+            processName: "node",
+            cwd: "/Users/me/work/port-menu",
+            gitRoot: URL(filePath: "/Users/me/work/port-menu"),
+            packagePath: nil,
+            command: "node /Users/me/work/port-menu/scripts/dev.js"
+        )
+        #expect(name == "port-menu")
+    }
+}
+
+// MARK: - Package Identity Tests
+
+struct PackageIdentityTests {
+
+    /// 造一个 `node_modules/<pkg>` 的假包，`bin` 用真实世界里最常见的写法。
+    private func makePackage(
+        name: String,
+        bin: [String: String]?,
+        scriptRelativePath: String = "lib/bin.js"
+    ) throws -> String {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "pkg-fixture-\(UUID().uuidString)/node_modules/\(name)")
+        let scriptURL = root.appending(path: scriptRelativePath)
+        try FileManager.default.createDirectory(
+            at: scriptURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
+
+        var manifest: [String: Any] = ["name": name]
+        if let bin { manifest["bin"] = bin }
+        let data = try JSONSerialization.data(withJSONObject: manifest)
+        try data.write(to: root.appending(path: "package.json"))
+        return scriptURL.path()
+    }
+
+    /// `bin` 键就是用户敲的命令，优先用它。
+    @Test func usesBinKeyWhenItMatchesTheScript() throws {
+        let script = try makePackage(name: "@deepseek-ai/dsh", bin: ["dsh": "lib/bin.js"])
+        #expect(PackageIdentity.name(forScript: script) == "dsh")
+        try? FileManager.default.removeItem(at: URL(filePath: script).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+    }
+
+    /// `bin` 值是 `./bin/tsc` 这种带 `./` 的相对路径，必须归一化后才比得上。
+    @Test func normalizesDotSlashInBinValues() throws {
+        let script = try makePackage(
+            name: "typescript",
+            bin: ["tsc": "./bin/tsc", "tsserver": "./bin/tsserver"],
+            scriptRelativePath: "bin/tsc"
+        )
+        #expect(PackageIdentity.name(forScript: script) == "tsc")
+    }
+
+    /// 多 bin 包、脚本匹配不上任何一个 bin 值 → 用包名（保留 scope），不猜键。
+    @Test func fallsBackToScopedPackageNameWhenNoBinMatches() throws {
+        let script = try makePackage(
+            name: "@heigame2020/xyx-cli",
+            bin: ["xyx": "./dist/main.js"],
+            scriptRelativePath: "lib/other.js"
+        )
+        #expect(PackageIdentity.name(forScript: script) == "@heigame2020/xyx-cli")
+    }
+
+    /// 字符串形式的 `bin` 没有键名 → 用包名。
+    @Test func stringBinFallsBackToPackageName() throws {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "pkg-stringbin-\(UUID().uuidString)/node_modules/single-bin")
+        let scriptURL = root.appending(path: "lib/bin.js")
+        try FileManager.default.createDirectory(
+            at: scriptURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
+        let data = try JSONSerialization.data(withJSONObject: ["name": "single-bin", "bin": "lib/bin.js"])
+        try data.write(to: root.appending(path: "package.json"))
+
+        #expect(PackageIdentity.name(forScript: scriptURL.path()) == "single-bin")
+        try? FileManager.default.removeItem(at: root.deletingLastPathComponent().deletingLastPathComponent())
+    }
+
+    /// 项目自己的脚本：**只认 bin 命中**，不拿包名顶替。
+    /// 否则一个 Rust 二进制（`target/debug/foo`）会捞到上层 JS 项目的名字。
+    @Test func projectsOwnScriptNeedsABinMatch() throws {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "proj-fixture-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root.appending(path: "dist"), withIntermediateDirectories: true
+        )
+        let scriptURL = root.appending(path: "dist/main.js")
+        try "// script".write(to: scriptURL, atomically: true, encoding: .utf8)
+        let data = try JSONSerialization.data(withJSONObject: [
+            "name": "@heigame2020/xyx-cli",
+            "bin": ["xyx": "dist/main.js"],
+        ])
+        try data.write(to: root.appending(path: "package.json"))
+
+        // bin 命中 → 用键名
+        #expect(PackageIdentity.name(forScript: scriptURL.path()) == "xyx")
+        try? FileManager.default.removeItem(at: root)
+
+        // 没有 bin 字段 → 不拿包名顶替
+        let bare = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "proj-bare-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: bare, withIntermediateDirectories: true)
+        let bareScript = bare.appending(path: "tool.mjs")
+        try "// script".write(to: bareScript, atomically: true, encoding: .utf8)
+        let bareData = try JSONSerialization.data(withJSONObject: ["name": "my-app"])
+        try bareData.write(to: bare.appending(path: "package.json"))
+        #expect(PackageIdentity.name(forScript: bareScript.path()) == nil)
+        try? FileManager.default.removeItem(at: bare)
+    }
+
+    /// 端到端：真实那条 xyx 命令行 → `xyx`，而不是 `main`。
+    @Test func realXyxCommandResolvesThroughBinMetadata() throws {
+        let script = try makePackage(
+            name: "@heigame2020/xyx-cli",
+            bin: ["xyx": "./dist/main.js"],
+            scriptRelativePath: "dist/main.js"
+        )
+        let label = ProcessLabel.label(command: "node \(script)", processName: "node")
+        #expect(label == "xyx")
+        try? FileManager.default.removeItem(at: URL(filePath: script).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent())
+    }
+}
+
+// MARK: - Program Label Tests
+
+struct ProgramLabelTests {
+
+    /// 副行照常显示程序名，即使它和主行的包名相同（用户选择不做去重）。
+    @Test func keepsProgramNameEvenWhenItMatchesThePackage() {
+        #expect(LivePortScanner.programLabel("ticket-search") == "ticket-search")
+        #expect(LivePortScanner.programLabel("vite") == "vite")
+    }
+
+    /// 通用入口名仍然不显示。
+    @Test func dropsGenericEntryNames() {
+        #expect(LivePortScanner.programLabel("main") == "")
+        #expect(LivePortScanner.programLabel("index") == "")
+        #expect(LivePortScanner.programLabel("main.js") == "main.js")
+        #expect(LivePortScanner.programLabel("http.server") == "http.server")
+    }
+}
+
+// MARK: - Row Identity Tests
+
+struct RowIdentityTests {
+
+    private let repoRoot = URL(filePath: "/Users/me/work/gc-2026-10")
+
+    /// git 行：主行是仓库（或仓库 › 包），程序名留到副行。
+    @Test func gitRowUsesRepositoryIdentity() {
+        let name = LivePortScanner.rowIdentity(
+            processName: "node",
+            cwd: "/Users/me/work/gc-2026-10/packages/c3-disco-droids",
+            gitRoot: repoRoot,
+            packagePath: "c3-disco-droids"
+        )
+        #expect(name == "gc-2026-10 › c3-disco-droids")
+    }
+
+    /// 非 git 行：主行是 cwd 位置，而不是程序名——两种行共用一套结构。
+    @Test func nonGitRowUsesDirectoryAsIdentity() {
+        var home = FileManager.default.homeDirectoryForCurrentUser.path()
+        if home.count > 1, home.hasSuffix("/") { home.removeLast() }
+        let name = LivePortScanner.rowIdentity(
+            processName: "node",
+            cwd: home + "/Github",
+            gitRoot: nil,
+            packagePath: nil
+        )
+        #expect(name == "~/Github", "got \(name)")
+    }
+
+    /// 连目录都没有（`/`、家目录）时才退回程序名。
+    @Test func nonGitRowWithoutDirectoryFallsBackToProcessName() {
+        let name = LivePortScanner.rowIdentity(
+            processName: "node",
+            cwd: "/",
+            gitRoot: nil,
+            packagePath: nil
+        )
+        #expect(name == "node")
+    }
+
+    @Test func dockerStaysDocker() {
+        let name = LivePortScanner.rowIdentity(
+            processName: "com.docker.backend",
+            cwd: "/Users/me/Github",
+            gitRoot: nil,
+            packagePath: nil
+        )
+        #expect(name == "Docker")
+    }
+}
+
+// MARK: - TEMP 排查（跑完即删）
+@MainActor
+struct DiagnoseCountTests {
+    @Test func printState() async {
+        let result = await LivePortScanner().scan()
+        if case .success(let ports, let diag) = result {
+            print("[diag] entries=\(ports.count) \(diag.summary)")
+            for p in ports.sorted(by: { $0.port < $1.port }) {
+                print("[diag] \(p.port) | \(p.projectName) | branch=\(p.branch) | cmd=\(p.command)")
+            }
+        }
+        print("[diag] screens:")
+        for s in NSScreen.screens {
+            print("[diag]   \(s.localizedName) visible=\(s.visibleFrame.height) main=\(s == NSScreen.main)")
+        }
+        print("[diag] available(screen)=\(PortListMetrics.availableListHeight())  rowHeight=\(PortListMetrics.rowHeight)  headerAllowance=\(PortListMetrics.headerAllowance)")
+
+        if case .success(let ports, _) = result {
+            let store = PortStore(scanner: FakePortScanner(ports: [], delay: 0))
+            store.entries = ports
+            let hosting = NSHostingView(rootView: PortEntryListView().environment(store).frame(width: 340))
+            hosting.frame = NSRect(x: 0, y: 0, width: 340, height: 3000)
+            hosting.layoutSubtreeIfNeeded()
+            print("[diag] rendered list height=\(hosting.fittingSize.height) for \(ports.count) entries")
+        }
+    }
+}
+
+// MARK: - Row Parts Tests
+
+struct RowPartsTests {
+
+    /// 主行的两段必须分开携带：视图靠它们做"仓库弱、包强"的分级，
+    /// 而不是去解析 `" › "` 字符串。
+    @Test func monorepoRowCarriesBothParts() {
+        let row = ActivePort(
+            port: 3000,
+            pid: 1,
+            projectName: "gc-2026-10 › c3-disco-droids",
+            repository: "gc-2026-10",
+            packagePath: "c3-disco-droids",
+            branch: "main",
+            startTime: nil
+        )
+        #expect(row.repository == "gc-2026-10")
+        #expect(row.packagePath == "c3-disco-droids")
+    }
+
+    /// 单包仓库与非 git 行没有包段，主行按整串渲染（不出现多余的分隔符）。
+    @Test func singlePackageRowHasNoPackageSegment() {
+        let row = ActivePort(
+            port: 3000,
+            pid: 1,
+            projectName: "showyedge",
+            repository: "showyedge",
+            packagePath: "",
+            branch: "main",
+            startTime: nil
+        )
+        #expect(row.packagePath.isEmpty)
+
+        let nonGit = ActivePort(
+            port: 3080, pid: 2, projectName: "~/Github",
+            branch: "", startTime: nil
+        )
+        #expect(nonGit.repository.isEmpty)
+        #expect(nonGit.packagePath.isEmpty)
     }
 }
